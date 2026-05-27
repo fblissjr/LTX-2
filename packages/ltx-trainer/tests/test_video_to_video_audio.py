@@ -209,6 +209,68 @@ def test_with_audio_missing_audio_prompt_embeds_raises():
         strat.prepare_training_inputs(batch, _FixedSigmaSampler())
 
 
+# --- compute_loss (the extracted _masked_velocity_loss + two-stream sum) ---
+
+
+def _loss_inputs(*, ref_seq_len, video_loss_mask, video_targets, audio_targets=None, audio_loss_mask=None):
+    # compute_loss reads only targets/masks/ref_seq_len, not the Modality objects.
+    return ModelInputs(
+        video=None, audio=None,
+        video_targets=video_targets, audio_targets=audio_targets,
+        video_loss_mask=video_loss_mask, audio_loss_mask=audio_loss_mask,
+        ref_seq_len=ref_seq_len,
+    )
+
+
+def test_compute_loss_video_only_masked_value():
+    """video-only: masked MSE on the target portion (ref tokens excluded)."""
+    strat = _strategy(with_audio=False)
+    ref, tgt, c = 2, 3, 4
+    video_pred = torch.cat([torch.zeros(1, ref, c), torch.ones(1, tgt, c)], dim=1)  # target=1
+    video_targets = torch.zeros(1, tgt, c)
+    video_loss_mask = torch.tensor([[False, False, True, True, True]])
+    loss = strat.compute_loss(video_pred, None, _loss_inputs(
+        ref_seq_len=ref, video_loss_mask=video_loss_mask, video_targets=video_targets))
+    assert torch.allclose(loss, torch.tensor([1.0]))  # mean((1-0)^2) over target
+
+
+def test_compute_loss_adds_audio_term_when_targets_present():
+    strat = _strategy(with_audio=True, audio_mode="generate")
+    ref, tgt, c = 1, 2, 4
+    video_pred = torch.cat([torch.zeros(1, ref, c), torch.ones(1, tgt, c)], dim=1)
+    inputs = _loss_inputs(
+        ref_seq_len=ref, video_loss_mask=torch.tensor([[False, True, True]]),
+        video_targets=torch.zeros(1, tgt, c),
+        audio_targets=torch.zeros(1, 2, c), audio_loss_mask=torch.tensor([[True, True]]),
+    )
+    audio_pred = torch.full((1, 2, c), 2.0)  # audio err = 4
+    loss = strat.compute_loss(video_pred, audio_pred, inputs)
+    assert torch.allclose(loss, torch.tensor([5.0]))  # 1 (video) + 4 (audio)
+
+
+def test_compute_loss_skips_audio_when_targets_none():
+    """condition mode: audio_targets is None → no audio term (video loss only)."""
+    strat = _strategy(with_audio=True, audio_mode="condition")
+    ref, tgt, c = 1, 2, 4
+    video_pred = torch.cat([torch.zeros(1, ref, c), torch.ones(1, tgt, c)], dim=1)
+    loss = strat.compute_loss(video_pred, torch.full((1, 2, c), 9.0), _loss_inputs(
+        ref_seq_len=ref, video_loss_mask=torch.tensor([[False, True, True]]),
+        video_targets=torch.zeros(1, tgt, c), audio_targets=None,
+        audio_loss_mask=torch.tensor([[False, False]])))
+    assert torch.allclose(loss, torch.tensor([1.0]))
+
+
+def test_compute_loss_fully_masked_stream_is_zero_not_nan():
+    """continuation freezes the video → empty video loss mask → 0, not NaN."""
+    strat = _strategy(with_audio=False)
+    ref, tgt, c = 0, 3, 4
+    video_pred = torch.ones(1, tgt, c)
+    loss = strat.compute_loss(video_pred, None, _loss_inputs(
+        ref_seq_len=ref, video_loss_mask=torch.zeros(1, tgt, dtype=torch.bool),
+        video_targets=torch.zeros(1, tgt, c)))
+    assert torch.isfinite(loss).all() and torch.allclose(loss, torch.tensor([0.0]))
+
+
 @pytest.mark.parametrize(
     ("audio_seq_len", "num_latent_frames", "fps", "prefix_seconds", "expected"),
     [

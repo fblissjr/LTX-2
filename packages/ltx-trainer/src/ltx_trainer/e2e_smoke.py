@@ -1,0 +1,173 @@
+"""End-to-end integration smoke for the audio→video IC-LoRA pipeline.
+
+Drives the REAL pipeline (not stubs) through every stage and gates between them
+on FACTS, so the integration is exercised once cheaply and a failure points at a
+specific stage instead of sending you on a goose-hunt during a real run:
+
+  GEN        synthetic clips + handle-only captions          (CPU, automated)
+  PRECOMPUTE real process_dataset.py --with-audio            (GPU, invoked)
+  VALIDATE   real data_validation on the output    [HARD GATE: must be green]
+  TRAIN      real train.py, steps capped to a few   [HARD GATE: a checkpoint]
+
+Guardrails are deliberately FACT-based only (the hard rules we KNOW): required
+source dirs exist + non-empty, the validator passes (shapes/counts/conditions are
+real pipeline requirements), a checkpoint is produced. Things we merely believe
+(caption-leak heuristics, clip-count floors) are NOT hard gates here — they're
+the data-generation strategist's advisory call, not facts to block on.
+
+The GPU stages shell out to the genuine scripts; this module owns the sequencing
+and the gates. Gate + config-override logic is pure and unit-tested; the GPU
+invocations are thin.
+"""
+
+from __future__ import annotations
+
+import subprocess
+import sys
+from pathlib import Path
+
+# Source dirs the audio v2v IC-LoRA path requires after precompute (mirrors
+# VideoToVideoStrategy.get_data_sources with_audio=True).
+REQUIRED_SOURCES = ["latents", "conditions", "reference_latents", "audio_latents"]
+
+
+class SmokeGateError(RuntimeError):
+    """A hard, fact-based gate failed. Message names the stage + the concrete fact."""
+
+
+def gate_sources_present(precomputed_dir: Path, sources: list[str] = REQUIRED_SOURCES) -> None:
+    """FACT: every required source dir must exist and hold at least one .pt.
+    (A missing/empty audio_latents is the silent 'with_audio but no audio' gap.)"""
+    base = Path(precomputed_dir)
+    scan = base / ".precomputed" if (base / ".precomputed").exists() else base
+    missing = []
+    for s in sources:
+        d = scan / s
+        if not d.exists() or not any(d.glob("**/*.pt")):
+            missing.append(s)
+    if missing:
+        raise SmokeGateError(
+            f"PRECOMPUTE produced no .pt files for: {missing} (under {scan}). "
+            "process_dataset.py did not emit these — re-run it (with --with-audio for audio_latents)."
+        )
+
+
+def gate_validation(report) -> None:
+    """FACT: the validator must pass before training. Surfaces the specific errors
+    (count mismatch / shape / NaN / missing conditions) rather than a vague fail."""
+    if not report.ok:
+        errs = "\n  - ".join(report.all_errors())
+        raise SmokeGateError(f"VALIDATE failed — do not train on this data:\n  - {errs}")
+
+
+def gate_checkpoint(output_dir: Path) -> Path:
+    """FACT (the smoke's success definition): training produced a checkpoint."""
+    ckpts = sorted(Path(output_dir).glob("**/*.safetensors")) + sorted(Path(output_dir).glob("**/*.pt"))
+    if not ckpts:
+        raise SmokeGateError(
+            f"TRAIN produced no checkpoint under {output_dir}. The training step ran but emitted "
+            "nothing — check the trainer log for the real error (this gate just confirms the smoke "
+            "didn't silently no-op)."
+        )
+    return ckpts[-1]
+
+
+def make_smoke_train_config(base_config: dict, preprocessed_root: str, output_dir: str, steps: int) -> dict:
+    """Override a REAL base config for the smoke: point it at the smoke dataset,
+    cap steps, set the output dir, and ensure the audio strategy is on. Pure — we
+    override a known-good config rather than synthesize the schema from scratch."""
+    cfg = dict(base_config)
+    cfg.setdefault("data", {})
+    cfg["data"] = {**cfg.get("data", {}), "preprocessed_data_root": preprocessed_root}
+    cfg["training"] = {**cfg.get("training", {}), "steps": int(steps)}
+    cfg["output_dir"] = output_dir
+    ts = {**cfg.get("training_strategy", {})}
+    ts.setdefault("name", "video_to_video")
+    ts["with_audio"] = True
+    ts.setdefault("audio_mode", "condition")
+    cfg["training_strategy"] = ts
+    # cap checkpoint cadence so a few-step smoke actually writes one
+    cfg["checkpoints"] = {**cfg.get("checkpoints", {}), "interval": min(int(steps), cfg.get("checkpoints", {}).get("interval", steps))}
+    return cfg
+
+
+def _run(cmd: list[str], stage: str) -> None:
+    print(f"\n=== {stage}: {' '.join(cmd)} ===", flush=True)
+    proc = subprocess.run(cmd)
+    if proc.returncode != 0:
+        raise SmokeGateError(f"{stage} command failed (exit {proc.returncode}). See its output above.")
+
+
+def run_smoke(
+    *,
+    workdir: Path,
+    n_clips: int = 4,
+    captions_path: Path | None = None,
+    resolution_bucket: str = "256x256x25",
+    base_config: Path | None = None,
+    steps: int = 3,
+    python: str | None = None,
+) -> None:
+    """Run the full smoke. If captions_path is given, use that real dataset;
+    otherwise generate synthetic clips. If base_config is given, run the (capped)
+    train stage; otherwise stop after VALIDATE and print the train command."""
+    import json
+
+    import yaml
+
+    from ltx_trainer.data_validation import validate_dataset
+
+    workdir = Path(workdir)
+    workdir.mkdir(parents=True, exist_ok=True)
+    py = python or sys.executable
+    scripts = Path(__file__).resolve().parents[2] / "scripts"
+
+    # GEN
+    if captions_path is None:
+        from ltx_trainer.synthetic_av import generate_dataset
+
+        w, h, fps = (int(x) for x in resolution_bucket.split("x"))
+        print(f"=== GEN: {n_clips} synthetic beat→pulse clips ({w}x{h}@{fps}) ===", flush=True)
+        captions_path = generate_dataset(workdir, n_clips, fps=fps, width=w, height=h)
+        # Smoke uses the clip as its own reference (valid for an integration check;
+        # real audio→video training wants a STATIC reference — see data plan §1.2).
+        rows = json.loads(Path(captions_path).read_text())
+        for r in rows:
+            r["reference"] = r["video"]
+        Path(captions_path).write_text(json.dumps(rows, indent=2))
+
+    precomputed = workdir / "precomputed"
+
+    # PRECOMPUTE (real)
+    _run(
+        [py, str(scripts / "process_dataset.py"), str(captions_path),
+         "--output-dir", str(precomputed), "--with-audio",
+         "--resolution-buckets", resolution_bucket,
+         "--reference-column", "reference", "--caption-column", "caption", "--video-column", "video"],
+        "PRECOMPUTE",
+    )
+    gate_sources_present(precomputed)
+
+    # VALIDATE (real, hard gate)
+    print("\n=== VALIDATE ===", flush=True)
+    report = validate_dataset(precomputed, with_audio=True)
+    from ltx_trainer.data_validation import format_report
+
+    print(format_report(report))
+    gate_validation(report)
+    print("VALIDATE: green — data is shaped + paired + aligned correctly.")
+
+    # TRAIN (real, optional, hard gate)
+    if base_config is None:
+        print("\nData validated and ready to train. Provide --base-config <your.yaml> to run the "
+              "(step-capped) train smoke, or train yourself pointing preprocessed_data_root at:")
+        print(f"  {precomputed}")
+        return
+    out_dir = workdir / "smoke_out"
+    smoke_cfg = make_smoke_train_config(
+        yaml.safe_load(Path(base_config).read_text()), str(precomputed), str(out_dir), steps)
+    cfg_path = workdir / "smoke_config.yaml"
+    cfg_path.write_text(yaml.safe_dump(smoke_cfg))
+    _run([py, str(scripts / "train.py"), str(cfg_path)], "TRAIN")
+    ckpt = gate_checkpoint(out_dir)
+    print(f"\nSMOKE PASSED — full pipeline ran end to end; checkpoint at {ckpt}")
