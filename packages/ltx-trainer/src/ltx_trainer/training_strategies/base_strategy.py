@@ -217,6 +217,19 @@ class TrainingStrategy(ABC):
         return latent_coords.to(dtype)
 
     @staticmethod
+    def _masked_velocity_loss(pred: Tensor, target: Tensor, loss_mask: Tensor) -> Tensor:
+        """Per-element [B,] masked MSE velocity loss.
+
+        Mean of (pred-target)^2 over the True positions of loss_mask, per batch
+        element. A fully-masked-out stream contributes 0 (the clamp guards the
+        empty-mask divide) — so callers can sum streams without special-casing
+        an inactive one (e.g. video in continuation mode, audio in condition mode).
+        """
+        err = (pred - target).pow(2)
+        mask = loss_mask.unsqueeze(-1).float()
+        return err.mul(mask).mean(dim=[-2, -1]) / mask.mean(dim=[-2, -1]).clamp(min=1e-8)
+
+    @staticmethod
     def _create_per_token_timesteps(conditioning_mask: Tensor, sampled_sigma: Tensor) -> Tensor:
         """Create per-token timesteps based on conditioning mask.
         Args:

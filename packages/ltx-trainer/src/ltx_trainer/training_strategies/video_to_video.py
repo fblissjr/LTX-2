@@ -335,10 +335,7 @@ class VideoToVideoStrategy(TrainingStrategy):
         ref_seq_len = inputs.ref_seq_len
         target_pred = video_pred[:, ref_seq_len:, :]
         target_loss_mask = inputs.video_loss_mask[:, ref_seq_len:]
-
-        video_loss = (target_pred - inputs.video_targets).pow(2)
-        video_mask = target_loss_mask.unsqueeze(-1).float()
-        video_loss = video_loss.mul(video_mask).mean(dim=[-2, -1]) / video_mask.mean(dim=[-2, -1]).clamp(min=1e-8)
+        video_loss = self._masked_velocity_loss(target_pred, inputs.video_targets, target_loss_mask)
 
         if (
             not self.config.with_audio
@@ -348,9 +345,7 @@ class VideoToVideoStrategy(TrainingStrategy):
         ):
             return video_loss
 
-        audio_loss = (audio_pred - inputs.audio_targets).pow(2)
-        audio_mask = inputs.audio_loss_mask.unsqueeze(-1).float()
-        audio_loss = audio_loss.mul(audio_mask).mean(dim=[-2, -1]) / audio_mask.mean(dim=[-2, -1]).clamp(min=1e-8)
+        audio_loss = self._masked_velocity_loss(audio_pred, inputs.audio_targets, inputs.audio_loss_mask)
         return video_loss + audio_loss
 
     def _prepare_audio_inputs(
@@ -398,11 +393,20 @@ class VideoToVideoStrategy(TrainingStrategy):
                 audio_conditioning_mask[:, :n_clean] = True
         # else "generate": all False (all noised target)
 
-        sigmas_expanded = sigmas.view(-1, 1, 1)
-        audio_noise = torch.randn_like(audio_latents)
-        noisy_audio = (1 - sigmas_expanded) * audio_latents + sigmas_expanded * audio_noise
-        # Conditioning tokens keep the clean latent; only target tokens are noised.
-        noisy_audio = torch.where(audio_conditioning_mask.unsqueeze(-1), audio_latents, noisy_audio)
+        # Only noise the target tokens. In `condition` mode (the default) every
+        # token is clean context, so skip the randn + blend + where entirely —
+        # they'd all be discarded by the all-True mask. No targets ⇒ no audio loss.
+        audio_loss_mask = ~audio_conditioning_mask
+        if bool(audio_loss_mask.any()):
+            sigmas_expanded = sigmas.view(-1, 1, 1)
+            audio_noise = torch.randn_like(audio_latents)
+            noisy_audio = (1 - sigmas_expanded) * audio_latents + sigmas_expanded * audio_noise
+            # Conditioning tokens keep the clean latent; only target tokens are noised.
+            noisy_audio = torch.where(audio_conditioning_mask.unsqueeze(-1), audio_latents, noisy_audio)
+            audio_targets = audio_noise - audio_latents
+        else:
+            noisy_audio = audio_latents
+            audio_targets = None
 
         audio_timesteps = self._create_per_token_timesteps(audio_conditioning_mask, sigmas.squeeze())
         audio_positions = self._get_audio_positions(
@@ -420,11 +424,6 @@ class VideoToVideoStrategy(TrainingStrategy):
             context=audio_prompt_embeds,
             context_mask=prompt_attention_mask,
         )
-
-        # Loss only on the noised (target) tokens. All-clean (condition mode) →
-        # no targets, so the loss term is skipped entirely in compute_loss.
-        audio_loss_mask = ~audio_conditioning_mask
-        audio_targets = audio_noise - audio_latents if bool(audio_loss_mask.any()) else None
         return audio_modality, audio_targets, audio_loss_mask
 
     @staticmethod

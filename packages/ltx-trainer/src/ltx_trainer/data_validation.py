@@ -28,12 +28,17 @@ from pathlib import Path
 
 import torch
 
+from ltx_core.types import SpatioTemporalScaleFactors
+
 # Expected latent layouts (LTX-2). Video latent: [C=128, F, H, W]. Audio latent
 # (non-patchified, as written by process_videos): [C=8, T, mel=16].
 VIDEO_LATENT_CHANNELS = 128
 AUDIO_LATENT_CHANNELS = 8
 AUDIO_MEL_BINS = 16
-VIDEO_TEMPORAL_SCALE = 8  # latent frame -> pixel frame: (F-1)*8 + 1
+# latent frame -> pixel frame: (F-1)*time + 1. Sourced from the canonical VAE scale
+# factor (same value the trainer's strategies use) so the validator's duration math
+# can't drift from the model if the temporal factor ever changes.
+VIDEO_TEMPORAL_SCALE = SpatioTemporalScaleFactors.default().time
 
 # Default ratio tolerance for the empirical audio/video-rate alignment check.
 DEFAULT_ALIGNMENT_TOLERANCE = 0.10  # 10% off the dataset median = suspicious
