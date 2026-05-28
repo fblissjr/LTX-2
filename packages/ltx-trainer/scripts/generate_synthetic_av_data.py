@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import argparse
 
-from ltx_trainer.synthetic_av import generate_dataset
+from ltx_trainer.synthetic_av import generate_dataset, generate_dataset_paired_refs
 
 
 def main() -> None:
@@ -27,14 +27,27 @@ def main() -> None:
     ap.add_argument("--duration", type=float, default=3.0, help="seconds (snapped to the 8k+1 frame rule)")
     ap.add_argument("--res", default="256x256x25", help="WxHxFPS")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--paired-refs", action="store_true",
+                    help="v2 mode: each row gets a SEPARATE reference clip with the same "
+                         "visual identity but a different BPM (audio is load-bearing).")
+    ap.add_argument("--min-bpm-gap", type=float, default=20.0,
+                    help="(paired-refs only) minimum |target_bpm - reference_bpm| per row.")
     args = ap.parse_args()
 
     w, h, fps = (int(x) for x in args.res.split("x"))
-    captions = generate_dataset(
-        args.out, args.n, bpm_range=(args.bpm_min, args.bpm_max),
-        duration_s=args.duration, fps=fps, width=w, height=h, seed=args.seed,
-    )
-    print(f"Wrote {args.n} clips + {captions} + manifest.jsonl under {args.out}")
+    if args.paired_refs:
+        captions = generate_dataset_paired_refs(
+            args.out, args.n, bpm_range=(args.bpm_min, args.bpm_max),
+            min_bpm_gap=args.min_bpm_gap,
+            duration_s=args.duration, fps=fps, width=w, height=h, seed=args.seed,
+        )
+        print(f"Wrote {args.n} target clips + {args.n} reference clips + {captions} + manifest.jsonl under {args.out}")
+    else:
+        captions = generate_dataset(
+            args.out, args.n, bpm_range=(args.bpm_min, args.bpm_max),
+            duration_s=args.duration, fps=fps, width=w, height=h, seed=args.seed,
+        )
+        print(f"Wrote {args.n} clips + {captions} + manifest.jsonl under {args.out}")
 
 
 if __name__ == "__main__":

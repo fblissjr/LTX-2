@@ -200,3 +200,75 @@ def generate_dataset(
     captions_path.write_text(json.dumps(captions, indent=2))
     (out_dir / "manifest.jsonl").write_text("\n".join(json.dumps(m) for m in manifest) + "\n")
     return captions_path
+
+
+def generate_dataset_paired_refs(
+    out_dir: str | Path,
+    n: int,
+    *,
+    bpm_range: tuple[float, float] = (60.0, 160.0),
+    min_bpm_gap: float = 20.0,
+    duration_s: float = 3.0,
+    fps: int = 25,
+    width: int = 256,
+    height: int = 256,
+    seed: int = 0,
+) -> Path:
+    """E1.1 v2 — paired-reference variant. Each row gets a target clip + a
+    SEPARATE reference clip with the SAME visual identity (shape/color/center)
+    but a DIFFERENT BPM. Audio is the only signal that distinguishes target
+    rate from reference rate, so the LoRA cannot satisfy the loss by copying
+    the reference; it must use audio.
+
+    Background: v1 (`generate_dataset`) used `reference = target`, which let
+    the model satisfy the loss without using audio. Combined with a broad
+    LoRA target preset, this trained the LoRA to overwrite base's audio
+    coupling with near-zero deltas (musubi-tuner `docs/ltx_2.md:1971`).
+    """
+    out_dir = Path(out_dir)
+    clips_dir = out_dir / "clips"
+    refs_dir = out_dir / "references"
+    clips_dir.mkdir(parents=True, exist_ok=True)
+    refs_dir.mkdir(parents=True, exist_ok=True)
+    rng = np.random.default_rng(seed)
+    shapes = ["circle", "square"]
+    lo, hi = bpm_range
+    if hi - lo <= min_bpm_gap:
+        raise ValueError(f"bpm_range {bpm_range} too narrow for min_bpm_gap={min_bpm_gap}")
+
+    captions, manifest = [], []
+    for i in range(n):
+        shape = shapes[int(rng.integers(len(shapes)))]
+        color = tuple(int(c) for c in rng.integers(120, 256, size=3))
+        center = (float(rng.uniform(0.35, 0.65)), float(rng.uniform(0.35, 0.65)))
+        target_bpm = float(rng.uniform(lo, hi))
+        # Resample ref_bpm until it's at least min_bpm_gap away from target_bpm.
+        # The gap is the load-bearing signal — if ref_bpm ≈ target_bpm the audio
+        # contrast collapses and the row degenerates to v1's failure mode.
+        ref_bpm = float(rng.uniform(lo, hi))
+        while abs(ref_bpm - target_bpm) < min_bpm_gap:
+            ref_bpm = float(rng.uniform(lo, hi))
+        def _spec(bpm: float) -> ClipSpec:
+            return ClipSpec(bpm=bpm, duration_s=duration_s, fps=fps,
+                            width=width, height=height,
+                            shape=shape, color=color, center=center)
+        target_spec = _spec(target_bpm)
+        ref_spec = _spec(ref_bpm)
+        t_frames, t_audio, sr, t_beats = generate_beat_pulse_clip(target_spec)
+        r_frames, r_audio, _, r_beats = generate_beat_pulse_clip(ref_spec)
+        t_rel = f"clips/clip_{i:04d}.mp4"
+        r_rel = f"references/clip_{i:04d}.mp4"
+        write_clip(t_frames, t_audio, sr, fps, out_dir / t_rel)
+        write_clip(r_frames, r_audio, sr, fps, out_dir / r_rel)
+        captions.append({"video": t_rel, "caption": BEAT_PULSE_CAPTION, "reference": r_rel})
+        manifest.append({
+            "video": t_rel, "reference": r_rel,
+            "target_bpm": target_bpm, "reference_bpm": ref_bpm,
+            "n_target_beats": int(len(t_beats)), "n_reference_beats": int(len(r_beats)),
+            "shape": shape, "color": list(color), "center": list(center),
+            "duration_s": t_frames.shape[0] / fps,
+        })
+    captions_path = out_dir / "captions.json"
+    captions_path.write_text(json.dumps(captions, indent=2))
+    (out_dir / "manifest.jsonl").write_text("\n".join(json.dumps(m) for m in manifest) + "\n")
+    return captions_path
