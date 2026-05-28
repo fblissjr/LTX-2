@@ -35,6 +35,10 @@ RES_MULTIPLE = 32  # width/height must be divisible by 32
 # execution) — see data plan §1. Deliberately rate-free.
 BEAT_PULSE_CAPTION = "a glowing shape pulsing on a dark background"
 
+# Nuisance-identity shape vocabulary. Module-level so every generator variant
+# samples from the same set (drift risk if a third shape is added in one place).
+SHAPES = ("circle", "square")
+
 
 def snap_frames_to_8k1(n: int) -> int:
     """Nearest valid frame count `8k+1` at or below n, floored at 9."""
@@ -119,6 +123,36 @@ def generate_beat_pulse_clip(spec: ClipSpec) -> tuple[np.ndarray, np.ndarray, in
     return frames, audio, AUDIO_SAMPLE_RATE, beats
 
 
+def generate_static_identity_clip(spec: ClipSpec) -> tuple[np.ndarray, np.ndarray, int, np.ndarray]:
+    """Render a FROZEN identity clip — same shape/color/center as a beat-pulse
+    clip but with NO pulse (env held at 0, the resting radius/brightness) for
+    every frame. Returns the same 4-tuple shape as generate_beat_pulse_clip so
+    callers (write_clip) are interchangeable, with silent audio and no beats.
+
+    This is the static reference for the E1.1 v3 gate: it anchors identity but
+    cannot carry a rate (all frames identical), so audio is the only temporal
+    signal and the reference can't leak the target's pulse rate."""
+    assert_resolution(spec.width, spec.height)
+    n_frames = snap_frames_to_8k1(round(spec.duration_s * spec.fps))
+    duration_s = n_frames / spec.fps
+    h, w = spec.height, spec.width
+    cx = (spec.center[0] if spec.center else 0.5) * w
+    cy = (spec.center[1] if spec.center else 0.5) * h
+    yy, xx = np.mgrid[0:h, 0:w]
+    r = 0.12 * min(h, w)          # resting radius (env=0 branch of the pulse clip)
+    brightness = 0.35            # resting brightness (env=0)
+    color = np.array(spec.color, dtype=np.float64)
+    if spec.shape == "square":
+        mask = (np.abs(xx - cx) <= r) & (np.abs(yy - cy) <= r)
+    else:
+        mask = (xx - cx) ** 2 + (yy - cy) ** 2 <= r * r
+    one = np.zeros((h, w, 3), dtype=np.uint8)
+    one[mask] = np.clip(color * brightness, 0, 255).astype(np.uint8)
+    frames = np.repeat(one[None, ...], n_frames, axis=0)  # identical every frame
+    audio = np.zeros(int(duration_s * AUDIO_SAMPLE_RATE), dtype=np.float32)  # silent
+    return frames, audio, AUDIO_SAMPLE_RATE, np.empty(0, dtype=np.float64)
+
+
 def measure_pulse_rate(frames: np.ndarray, fps: float) -> float:
     """Recover the dominant pulse rate (BPM) from a video's per-frame brightness
     via a zero-padded FFT. Used to (a) self-test the generator and (b) score a
@@ -180,13 +214,12 @@ def generate_dataset(
     clips_dir = out_dir / "clips"
     clips_dir.mkdir(parents=True, exist_ok=True)
     rng = np.random.default_rng(seed)
-    shapes = ["circle", "square"]
     captions, manifest = [], []
     for i in range(n):
         spec = ClipSpec(
             bpm=float(rng.uniform(*bpm_range)),
             duration_s=duration_s, fps=fps, width=width, height=height,
-            shape=shapes[int(rng.integers(len(shapes)))],
+            shape=SHAPES[int(rng.integers(len(SHAPES)))],
             color=tuple(int(c) for c in rng.integers(120, 256, size=3)),
             center=(float(rng.uniform(0.35, 0.65)), float(rng.uniform(0.35, 0.65))),
         )
@@ -265,6 +298,67 @@ def generate_dataset_paired_refs(
             "video": t_rel, "reference": r_rel,
             "target_bpm": target_bpm, "reference_bpm": ref_bpm,
             "n_target_beats": int(len(t_beats)), "n_reference_beats": int(len(r_beats)),
+            "shape": shape, "color": list(color), "center": list(center),
+            "duration_s": t_frames.shape[0] / fps,
+        })
+    captions_path = out_dir / "captions.json"
+    captions_path.write_text(json.dumps(captions, indent=2))
+    (out_dir / "manifest.jsonl").write_text("\n".join(json.dumps(m) for m in manifest) + "\n")
+    return captions_path
+
+
+def generate_dataset_static_ref(
+    out_dir: str | Path,
+    n: int,
+    *,
+    bpm_range: tuple[float, float] = (50.0, 85.0),
+    duration_s: float = 3.0,
+    fps: int = 25,
+    width: int = 256,
+    height: int = 256,
+    seed: int = 0,
+) -> Path:
+    """E1.1 v3 — STATIC-identity-reference variant. Each row gets a beat-pulse
+    TARGET clip + a FROZEN identity reference (same shape/color/center, no
+    pulse). The reference anchors identity but carries no rate, so audio is the
+    only temporal signal and cannot be shortcut via the reference (kills the
+    corr(target_bpm, reference_bpm) leak the paired-ref variant had).
+
+    Default bpm_range is sub-Nyquist for the 8x-temporal video latent
+    (~94 BPM ceiling at 25fps) so the tracking-slope gate reads cleanly.
+
+    This is the zero-trainer-code stand-in for the product's "audio + prompt,
+    no reference" design: with a frozen reference the cross-modal bridge trains
+    on audio exactly as it would with no reference at all."""
+    out_dir = Path(out_dir)
+    (out_dir / "clips").mkdir(parents=True, exist_ok=True)
+    (out_dir / "references").mkdir(parents=True, exist_ok=True)
+    rng = np.random.default_rng(seed)
+    lo, hi = bpm_range
+    captions, manifest = [], []
+    for i in range(n):
+        shape = SHAPES[int(rng.integers(len(SHAPES)))]
+        color = tuple(int(c) for c in rng.integers(120, 256, size=3))
+        center = (float(rng.uniform(0.35, 0.65)), float(rng.uniform(0.35, 0.65)))
+        target_bpm = float(rng.uniform(lo, hi))
+
+        def _spec(bpm: float) -> ClipSpec:
+            return ClipSpec(bpm=bpm, duration_s=duration_s, fps=fps,
+                            width=width, height=height,
+                            shape=shape, color=color, center=center)
+
+        t_frames, t_audio, sr, t_beats = generate_beat_pulse_clip(_spec(target_bpm))
+        # Reference: frozen identity, no pulse, silent. bpm is irrelevant (unused).
+        r_frames, r_audio, _, _ = generate_static_identity_clip(_spec(target_bpm))
+        t_rel = f"clips/clip_{i:04d}.mp4"
+        r_rel = f"references/clip_{i:04d}.mp4"
+        write_clip(t_frames, t_audio, sr, fps, out_dir / t_rel)
+        write_clip(r_frames, r_audio, sr, fps, out_dir / r_rel)
+        captions.append({"video": t_rel, "caption": BEAT_PULSE_CAPTION, "reference": r_rel})
+        manifest.append({
+            "video": t_rel, "reference": r_rel,
+            "target_bpm": target_bpm, "reference_static": True,
+            "n_target_beats": int(len(t_beats)),
             "shape": shape, "color": list(color), "center": list(center),
             "duration_s": t_frames.shape[0] / fps,
         })
