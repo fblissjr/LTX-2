@@ -131,6 +131,31 @@ def synthetic_dataset_bucket(width: int, height: int, fps: int, duration_s: floa
     return f"{width}x{height}x{snap_frames_to_8k1(round(duration_s * fps))}"
 
 
+def generate_smoke_dataset(
+    workdir: str | Path,
+    n_clips: int,
+    *,
+    fps: int,
+    width: int,
+    height: int,
+    duration_s: float,
+) -> Path:
+    """Generate the synthetic smoke dataset with PAIRED references (ref != target).
+
+    Uses ``synthetic_av.generate_dataset_paired_refs`` so the integration smoke
+    exercises the SAME reference-encoding path as real audio→video training (a
+    separate reference clip per row, same identity / different BPM) rather than
+    the old ref==target shortcut. ref==target both let a broken pipeline pass the
+    smoke AND was the data bug that suppressed audio coupling in the first real
+    run — keeping the smoke on paired refs closes both. See data plan §1.2.
+    """
+    from ltx_trainer.synthetic_av import generate_dataset_paired_refs
+
+    return generate_dataset_paired_refs(
+        workdir, n_clips, fps=fps, width=width, height=height, duration_s=duration_s
+    )
+
+
 def run_smoke(
     *,
     workdir: Path,
@@ -164,16 +189,12 @@ def run_smoke(
 
     # GEN
     if captions_path is None:
-        from ltx_trainer.synthetic_av import generate_dataset
-
-        print(f"=== GEN: {n_clips} synthetic beat→pulse clips ({w}x{h}@{fps}fps, {duration_s}s) ===", flush=True)
-        captions_path = generate_dataset(workdir, n_clips, fps=fps, width=w, height=h, duration_s=duration_s)
-        # Smoke uses the clip as its own reference (valid for an integration check;
-        # real audio→video training wants a STATIC reference — see data plan §1.2).
-        rows = json.loads(Path(captions_path).read_text())
-        for r in rows:
-            r["reference"] = r["video"]
-        Path(captions_path).write_text(json.dumps(rows, indent=2))
+        print(
+            f"=== GEN: {n_clips} synthetic beat→pulse clips ({w}x{h}@{fps}fps, {duration_s}s, "
+            "paired refs: ref != target) ===",
+            flush=True,
+        )
+        captions_path = generate_smoke_dataset(workdir, n_clips, fps=fps, width=w, height=h, duration_s=duration_s)
         # process_dataset buckets by FRAME COUNT, not fps — derive it from the clips.
         bucket = dataset_bucket or synthetic_dataset_bucket(w, h, fps, duration_s)
     else:

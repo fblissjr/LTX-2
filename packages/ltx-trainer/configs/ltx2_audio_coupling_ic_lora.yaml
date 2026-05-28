@@ -1,0 +1,178 @@
+# =============================================================================
+# LTX-2 Audio-Coupling IC-LoRA Training Configuration
+# =============================================================================
+#
+# Goal: an IC-LoRA that makes the generated VIDEO react to the driving AUDIO
+# (e.g. visual pulse tracks the beat), WITHOUT degrading the base model's
+# video quality.
+#
+# This is the standard `video_to_video` IC-LoRA strategy in `audio_mode:
+# condition` — NOT a separate "audio reference" strategy. The reference is a
+# VIDEO; the audio is clean guidance; loss is on the target video.
+#
+# WHY THIS SHAPE (read before changing target_modules):
+#   A prior run failed two ways and this config fixes both:
+#     1. ref == target  → the model copied the pulse straight from the
+#        reference video and never needed the audio. FIX (data side): the
+#        paired-refs dataset uses a reference clip with the SAME visual
+#        identity but a DIFFERENT BPM, so the reference can't supply the
+#        target's pulse — only the audio can.
+#     2. broad target_modules (to_k/to_q/to_v/to_out.0) put LoRA capacity on
+#        the VIDEO self-attention, i.e. exactly where the "copy the reference"
+#        shortcut lives. FIX (this config): target ONLY the audio + audio→video
+#        cross-modal modules, so the adapter's capacity is concentrated on the
+#        path that routes the beat into the video, and the frozen video branch
+#        keeps the base model's quality intact.
+#
+#   In `condition` mode the audio tokens are clean context (no audio loss), so
+#   gradient reaches the audio stack and the audio→video bridge THROUGH the
+#   video reconstruction loss. `video_to_audio_attn` is inert in this mode
+#   (it only writes to the audio output, which has no loss here); it is left
+#   out of the targets below. Add it back only if you switch to
+#   `audio_mode: generate`.
+#
+# Dataset structure (produced by generate_synthetic_av_data.py --paired-refs
+# then process_dataset.py --with-audio --reference-column reference):
+#   preprocessed_data_root/
+#   ├── latents/           # Target video latents (what the model generates)
+#   ├── conditions/        # Text embeddings
+#   ├── reference_latents/ # Reference VIDEO latents (different BPM, same identity)
+#   └── audio_latents/     # Target audio latents (the driving beat — clean guide)
+#
+# The rigorous audio-reactivity check is the standalone audio-swap eval
+# (scripts/run_audio_coupling_eval.py: tracking-slope + delta vs no-LoRA
+# baseline), NOT the in-training validation samples below.
+# =============================================================================
+
+model:
+  # .safetensors checkpoint (LTX-2.3 22B distilled). Local path only.
+  model_path: "/path/to/ltx-2.3-22b-distilled.safetensors"
+  # Gemma text-encoder directory. Local path only.
+  text_encoder_path: "/path/to/gemma-text-encoder"
+  # video_to_video strategy requires lora mode.
+  training_mode: "lora"
+  load_checkpoint: null
+
+lora:
+  rank: 32
+  alpha: 32
+  dropout: 0.0
+  # AUDIO-TARGETED ONLY. Fully-qualified leaf names: the `audio_` prefix is
+  # what excludes the video-side attn1/attn2/ff (a bare "to_k" would also match
+  # video and re-introduce the failure mode). See header for the rationale.
+  target_modules:
+    # Audio self-attention
+    - "audio_attn1.to_k"
+    - "audio_attn1.to_q"
+    - "audio_attn1.to_v"
+    - "audio_attn1.to_out.0"
+    # Audio cross-attention (to text)
+    - "audio_attn2.to_k"
+    - "audio_attn2.to_q"
+    - "audio_attn2.to_v"
+    - "audio_attn2.to_out.0"
+    # Audio feed-forward
+    - "audio_ff.net.0.proj"
+    - "audio_ff.net.2"
+    # Cross-modal bridge: video attends to audio (Q from video, K/V from audio).
+    # THIS is the load-bearing module for audio->video coupling.
+    - "audio_to_video_attn.to_k"
+    - "audio_to_video_attn.to_q"
+    - "audio_to_video_attn.to_v"
+    - "audio_to_video_attn.to_out.0"
+
+training_strategy:
+  name: "video_to_video"
+  # Fraction of steps conditioned on a clean first frame. OPEN QUESTION before
+  # tuning: which inference path does the trained adapter target? The eval uses a
+  # reference-video guide (LTXAddVideoICLoRAGuideAdvanced), but the shipped
+  # audio-reactive workflow animates an INIT IMAGE (first frame always provided).
+  # If init-image inference is the real target, raise this to match that
+  # distribution — training mostly without a first frame while inference always
+  # supplies one is a train/inference mismatch. Left at the strategy default for
+  # the ref-video gate; confirm the topology before raising.
+  first_frame_conditioning_p: 0.1
+  reference_latents_dir: "reference_latents"
+  # Pull audio into the loop so the adapter can learn the audio->video relation.
+  with_audio: true
+  audio_latents_dir: "audio_latents"
+  # condition = audio is clean guidance, loss on video (audio guides video).
+  audio_mode: "condition"
+
+optimization:
+  learning_rate: 2e-4
+  steps: 3000
+  batch_size: 1
+  gradient_accumulation_steps: 1
+  max_grad_norm: 1.0
+  optimizer_type: "adamw"
+  scheduler_type: "linear"
+  scheduler_params: { }
+  # Required for the 24 GB (4090) fit alongside block-swap.
+  enable_gradient_checkpointing: true
+
+acceleration:
+  mixed_precision_mode: "bf16"
+  # int8-quanto + block-swap is the verified 22B-on-24GB recipe (E0.2).
+  quantization: "int8-quanto"
+  load_text_encoder_in_8bit: true
+  # Swap 36/48 transformer blocks to CPU between steps to fit 24 GB. Must run
+  # after accelerator.prepare() — the trainer wires this correctly.
+  block_swap_blocks: 36
+  offload_optimizer_during_validation: false
+
+data:
+  # Point at the paired-refs precompute dir (…/synth_e1_v2_100c/precomputed).
+  preprocessed_data_root: "/path/to/synth_e1_v2_100c/precomputed"
+  num_dataloader_workers: 2
+
+validation:
+  # Lightweight in-training preview only. The real gate is the audio-swap eval.
+  prompts:
+    - "A solid circle pulses on a flat background, expanding and contracting in time with a steady electronic beat."
+    - "A square pulses rhythmically on a plain background, scaling up and down on each beat of the music."
+  # REQUIRED for video_to_video. One reference video per prompt (a neutral-BPM
+  # reference clip from the dataset's references/ dir).
+  reference_videos:
+    - "/path/to/synth_e1_v2_100c/references/clip_0001.mp4"
+    - "/path/to/synth_e1_v2_100c/references/clip_0002.mp4"
+  # References are encoded at full resolution (paired-refs uses no downscale).
+  reference_downscale_factor: 1
+  negative_prompt: "worst quality, inconsistent motion, blurry, jittery, distorted"
+  images: null
+  # Match the dataset resolution bucket (256x256x73).
+  video_dims: [ 256, 256, 73 ]
+  frame_rate: 25.0
+  seed: 42
+  inference_steps: 30
+  interval: 250
+  guidance_scale: 4.0
+  stg_scale: 1.0
+  stg_blocks: [29]
+  stg_mode: "stg_v"
+  generate_audio: false
+  skip_initial_validation: false
+  include_reference_in_output: true
+
+checkpoints:
+  interval: 250
+  keep_last_n: 3
+  precision: "bfloat16"
+
+flow_matching:
+  timestep_sampling_mode: "shifted_logit_normal"
+  timestep_sampling_params: { }
+
+hub:
+  push_to_hub: false
+  hub_model_id: null
+
+wandb:
+  enabled: false
+  project: "ltx-2-trainer"
+  entity: null
+  tags: [ "ltx2", "ic-lora", "audio-coupling" ]
+  log_validation_videos: true
+
+seed: 42
+output_dir: "outputs/ltx2_audio_coupling_ic_lora"

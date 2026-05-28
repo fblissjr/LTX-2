@@ -130,6 +130,31 @@ def test_audio_video_misalignment_warns(tmp_path):
     assert any("deviates" in w and "rate" in w for w in report.all_warnings())
 
 
+def test_reference_equals_target_warns(tmp_path):
+    """ref==target is the silent footgun that broke the first audio-coupling run:
+    if the reference latent is byte-identical to the target, the model copies the
+    answer from the reference and the audio/text conditioning is never load-bearing.
+    Must surface as a (loud) warning, not pass silently."""
+    _write_dataset(tmp_path, 3, with_audio=True)
+    # Clobber each reference latent with a byte-identical copy of its target.
+    for i in range(3):
+        tgt = torch.load(tmp_path / "latents" / f"latent_{i}.pt", weights_only=True)
+        torch.save(tgt, tmp_path / "reference_latents" / f"latent_{i}.pt")
+    report = validate_dataset(tmp_path, with_audio=True)
+    assert report.ok  # shapes valid; ref==target is a WARNING, not a hard error
+    assert any("identical to the target" in w for w in report.all_warnings()), (
+        f"expected ref==target warning, got: {report.all_warnings()}"
+    )
+
+
+def test_distinct_reference_does_not_warn(tmp_path):
+    """The normal case (reference clip differs from target) must NOT warn."""
+    _write_dataset(tmp_path, 3, with_audio=True)  # ref is _video(frames=3) != target
+    report = validate_dataset(tmp_path, with_audio=True)
+    assert report.ok
+    assert not any("identical to the target" in w for w in report.all_warnings())
+
+
 def test_video_only_dataset_ok_without_audio(tmp_path):
     """with_audio=False must validate a video-only dataset (no audio dir required)."""
     _write_dataset(tmp_path, 3, with_audio=False)

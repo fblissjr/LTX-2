@@ -1188,6 +1188,15 @@ class LtxvTrainer:
             # Convert to ComfyUI-compatible format (add "diffusion_model." prefix)
             state_dict = {f"diffusion_model.{k}": v for k, v in state_dict.items()}
 
+            # Strip the `transformer_blocks.<N>.block.` segment that block-swap's
+            # StreamingBlockWrapper injects into swapped-block keys — ComfyUI's
+            # transformer has no wrapper, so those keys (often the majority of the
+            # adapter) would silently no-op at inference. Idempotent: a no-op when
+            # block-swap is off. Removes the need for the external converter.
+            from ltx_trainer.block_swap import strip_block_swap_prefix
+
+            state_dict = strip_block_swap_prefix(state_dict)
+
             # Cast to configured precision
             state_dict = {k: v.to(save_dtype) if isinstance(v, Tensor) else v for k, v in state_dict.items()}
 

@@ -20,6 +20,7 @@ from ltx_trainer.block_swap import (
     BlockSwapManager,
     StreamingBlockWrapper,
     attach_block_swap,
+    strip_block_swap_prefix,
 )
 
 CPU = torch.device("cpu")
@@ -241,3 +242,32 @@ def test_wrapper_streams_out_even_when_block_raises():
     # via the finally clause — this is what protects against the leak).
     kinds = [k for k, _ in mgr.events]
     assert kinds == ["in", "out"]
+
+
+# --- LoRA save-path key normalization ---------------------------------------
+# attach_block_swap wraps swapped blocks in StreamingBlockWrapper (real block at
+# `.block`), so their LoRA params serialize as `transformer_blocks.<N>.block.<rest>`.
+# ComfyUI's transformer has no wrapper → those keys silently no-op at inference.
+# strip_block_swap_prefix rewrites them to the unwrapped paths at save time.
+
+
+def test_strip_block_swap_prefix_rewrites_wrapped_keys():
+    sd = {
+        # kept-on-GPU block (0-11): no wrapper, direct path
+        "diffusion_model.transformer_blocks.0.audio_attn1.to_k.lora_A.weight": torch.zeros(1),
+        # swapped blocks (12-47): wrapped, carry the spurious `.block.`
+        "diffusion_model.transformer_blocks.12.block.audio_attn1.to_k.lora_A.weight": torch.ones(1),
+        "diffusion_model.transformer_blocks.47.block.audio_to_video_attn.to_out.0.lora_B.weight": torch.ones(1),
+    }
+    out = strip_block_swap_prefix(sd)
+    assert "diffusion_model.transformer_blocks.12.audio_attn1.to_k.lora_A.weight" in out
+    assert "diffusion_model.transformer_blocks.47.audio_to_video_attn.to_out.0.lora_B.weight" in out
+    assert "diffusion_model.transformer_blocks.0.audio_attn1.to_k.lora_A.weight" in out  # unchanged
+    assert not any(".block." in k for k in out), f"residual .block. in {list(out)}"
+    assert len(out) == 3  # no key collisions / drops
+    assert strip_block_swap_prefix(out) == out  # idempotent
+
+
+def test_strip_block_swap_prefix_no_op_without_swap():
+    sd = {"diffusion_model.transformer_blocks.3.ff.net.2.lora_A.weight": torch.zeros(1)}
+    assert strip_block_swap_prefix(sd) == sd

@@ -51,8 +51,30 @@ params (musubi's `skip_trainable=True` pattern).
 
 from __future__ import annotations
 
+import re
+
 import torch
 import torch.nn as nn
+
+# `attach_block_swap` replaces transformer_blocks[i] with a StreamingBlockWrapper
+# holding the real block at `.block`, so swapped blocks serialize their params as
+# `transformer_blocks.<N>.block.<rest>` while kept blocks stay
+# `transformer_blocks.<N>.<rest>`. This regex matches that wrapper segment (with
+# or without a leading `diffusion_model.` prefix). Mirrors the ComfyUI-side
+# converter's pattern so the trainer can emit inference-ready keys directly.
+_BLOCK_SWAP_KEY_RE = re.compile(r"(transformer_blocks\.\d+)\.block\.")
+
+
+def strip_block_swap_prefix(state_dict: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+    """Rewrite ``transformer_blocks.<N>.block.<rest>`` keys to ``transformer_blocks.<N>.<rest>``.
+
+    ComfyUI's transformer has no StreamingBlockWrapper, so the spurious ``.block.``
+    segment makes those LoRA keys silently no-op at inference (the swapped blocks —
+    often the majority of the adapter — would contribute nothing). Stripping it at
+    save time makes the checkpoint load correctly without the external converter.
+    Idempotent: keys without the segment pass through unchanged.
+    """
+    return {_BLOCK_SWAP_KEY_RE.sub(r"\1.", k): v for k, v in state_dict.items()}
 
 
 class BlockSwapManager:

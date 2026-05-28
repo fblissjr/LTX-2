@@ -62,6 +62,23 @@ def test_gate_checkpoint(tmp_path):
     assert gate_checkpoint(tmp_path).name == "adapter.safetensors"
 
 
+def test_generate_smoke_dataset_uses_paired_refs(tmp_path):
+    """The smoke must generate ref != target data (paired references), so the
+    integration gate exercises the real reference-encoding path and never
+    green-lights the ref==target shortcut that broke the first coupling run."""
+    import json
+
+    from ltx_trainer.e2e_smoke import generate_smoke_dataset
+
+    captions_path = generate_smoke_dataset(tmp_path, 4, fps=25, width=64, height=64, duration_s=1.0)
+    rows = json.loads(captions_path.read_text())
+    assert len(rows) == 4
+    assert all("reference" in r for r in rows), rows
+    assert all(r["reference"] != r["video"] for r in rows), (
+        f"smoke generated ref==target (the failure mode): {rows}"
+    )
+
+
 def test_make_smoke_train_config_overrides():
     base = {
         "model": {"model_path": "x", "training_mode": "lora"},

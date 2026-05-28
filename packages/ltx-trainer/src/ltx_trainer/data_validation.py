@@ -146,6 +146,21 @@ def validate_sample(
         _check_latent(ref_t, "reference", VIDEO_LATENT_CHANNELS, sr)
         if isinstance(ref_t, torch.Tensor) and ref_t.dim() == 4:
             sr.ref_shape = tuple(ref_t.shape)
+            # ref==target is the silent footgun that broke the first audio-coupling
+            # run: if the reference latent is byte-identical to the target, the model
+            # can copy the answer straight from the reference and the audio/text
+            # conditioning never becomes load-bearing. A degenerate reference passes
+            # every shape/finiteness check, so flag it explicitly here.
+            if (
+                isinstance(video_t, torch.Tensor)
+                and video_t.shape == ref_t.shape
+                and torch.equal(ref_t, video_t)
+            ):
+                sr.warnings.append(
+                    "reference latent is identical to the target latent — the "
+                    "reference leaks the answer, so audio/text conditioning can't be "
+                    "load-bearing. Use a reference clip that differs from the target."
+                )
 
     if with_audio:
         audio = sample.get(audio_key, {})
