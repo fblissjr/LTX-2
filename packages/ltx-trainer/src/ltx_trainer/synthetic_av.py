@@ -140,10 +140,13 @@ def write_clip(frames: np.ndarray, audio: np.ndarray, sample_rate: int, fps: int
     out_path.parent.mkdir(parents=True, exist_ok=True)
     wav_path = out_path.with_suffix(".wav")
     with wave.open(str(wav_path), "wb") as wf:
-        wf.setnchannels(1)
+        # LTX-2's audio VAE expects STEREO (2-channel) input — write the mono click
+        # track duplicated to L+R so the precompute mel is [B, 2, T, mel].
+        wf.setnchannels(2)
         wf.setsampwidth(2)
         wf.setframerate(sample_rate)
-        wf.writeframes((np.clip(audio, -1, 1) * 32767).astype("<i2").tobytes())
+        stereo = np.stack([audio, audio], axis=-1)  # [N, 2] interleaved
+        wf.writeframes((np.clip(stereo, -1, 1) * 32767).astype("<i2").tobytes())
     h, w = frames.shape[1], frames.shape[2]
     cmd = [
         "ffmpeg", "-y", "-loglevel", "error",

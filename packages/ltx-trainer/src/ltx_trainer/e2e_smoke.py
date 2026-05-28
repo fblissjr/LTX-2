@@ -118,6 +118,7 @@ def run_smoke(
     dataset_bucket: str | None = None,  # process_dataset WxH×FRAMES; required for real --captions
     model_path: str | None = None,  # single-file LTX-2 checkpoint (VAEs + projectors)
     text_encoder_path: str | None = None,  # Gemma dir
+    load_text_encoder_in_8bit: bool = False,  # Gemma-12B bf16 ≈ 24GB; 8bit fits a 4090
     base_config: Path | None = None,
     steps: int = 3,
     python: str | None = None,
@@ -170,14 +171,14 @@ def run_smoke(
     precomputed = workdir / "precomputed"
 
     # PRECOMPUTE (real)
-    _run(
-        [py, str(scripts / "process_dataset.py"), str(captions_path),
-         "--output-dir", str(precomputed), "--with-audio",
-         "--model-path", str(model_path), "--text-encoder-path", str(text_encoder_path),
-         "--resolution-buckets", bucket,
-         "--reference-column", "reference", "--caption-column", "caption", "--video-column", "video"],
-        "PRECOMPUTE",
-    )
+    cmd = [py, str(scripts / "process_dataset.py"), str(captions_path),
+           "--output-dir", str(precomputed), "--with-audio",
+           "--model-path", str(model_path), "--text-encoder-path", str(text_encoder_path),
+           "--resolution-buckets", bucket,
+           "--reference-column", "reference", "--caption-column", "caption", "--video-column", "video"]
+    if load_text_encoder_in_8bit:
+        cmd.append("--load-text-encoder-in-8bit")
+    _run(cmd, "PRECOMPUTE")
     gate_sources_present(precomputed)
 
     # VALIDATE (real, hard gate)

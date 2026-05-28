@@ -36,6 +36,8 @@ def main() -> None:
     ap.add_argument("--model-path", default=None,
                     help="Single-file LTX-2 checkpoint with VAEs+projectors (REQUIRED for precompute)")
     ap.add_argument("--text-encoder-path", default=None, help="Gemma model dir (REQUIRED for precompute)")
+    ap.add_argument("--load-text-encoder-in-8bit", action="store_true",
+                    help="Load Gemma in 8-bit (fits a 24GB 4090; bf16 Gemma-12B ~24GB will OOM)")
     ap.add_argument("--base-config", type=Path, default=None, help="Real train YAML to step-cap for the train smoke")
     ap.add_argument("--steps", type=int, default=3, help="Training steps for the smoke")
     args = ap.parse_args()
@@ -45,7 +47,9 @@ def main() -> None:
             workdir=args.workdir, n_clips=args.n_clips, captions_path=args.captions,
             resolution_bucket=args.resolution_bucket, duration_s=args.duration,
             dataset_bucket=args.dataset_bucket, model_path=args.model_path,
-            text_encoder_path=args.text_encoder_path, base_config=args.base_config, steps=args.steps,
+            text_encoder_path=args.text_encoder_path,
+            load_text_encoder_in_8bit=args.load_text_encoder_in_8bit,
+            base_config=args.base_config, steps=args.steps,
         )
     except SmokeGateError as e:
         raise SystemExit(f"\nSMOKE FAILED at a gate:\n{e}") from e
