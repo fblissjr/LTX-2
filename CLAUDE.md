@@ -78,7 +78,7 @@ This fork tracks musubi-tuner's LTX-2 work as prior art (cloned at `../musubi-tu
 Bilateral async channel between this Claude (LTX-2 fork side) and audio-loop-lab claude (the parent ComfyUI-AudioLoopHelper project that consumes LTX-2 trainer outputs). Mirrors the sage-fork channel pattern.
 
 - **Inbound** (audio-loop-lab → us): `internal/AUDIO_LOOP_CLAUDE_TO_LTX2_CLAUDE_MEMO.md`. SessionStart hook at `.claude/hooks/check_memo_inbox.sh` notifies us when it's newer than `internal/.memo_inbox_seen_at`.
-- **Outbound** (us → audio-loop-lab): `coderef/audio-loop-lab/internal/LTX2_CLAUDE_TO_AUDIO_LOOP_CLAUDE_MEMO.md` (via the reverse symlink at `coderef/audio-loop-lab` → the parent ComfyUI-AudioLoopHelper repo).
+- **Outbound** (us → audio-loop-lab): `coderef/ComfyUI-AudioLoopHelper/internal/LTX2_CLAUDE_TO_AUDIO_LOOP_CLAUDE_MEMO.md` (via the reverse symlink at `coderef/ComfyUI-AudioLoopHelper` → the parent ComfyUI-AudioLoopHelper repo).
 - **Skill**: `.claude/skills/cross-repo-handoff/SKILL.md` — trigger phrases like "send memo to audio-loop-lab", "check audio-loop memo", "respond to audio-loop-lab".
 - **Send helper**: `internal/scripts/send_memo_to_audio_loop_lab.sh` — bumps outbound mtime after a memo edit.
 
