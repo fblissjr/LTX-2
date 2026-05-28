@@ -1,44 +1,28 @@
 """Block-swap — stream transformer blocks GPU<->CPU during forward + backward
 so a large base fits training on a 24 GB 4090.
 
-## STATUS: INCOMPLETE for int8-quanto (the immediate target)
+## The key correctness point (the trap that ate hours of debugging)
 
-Despite engaging without error, this MVP moves only ~0.3 GB of a 22 GB int8
-base. Root cause empirically isolated 2026-05-27 late: in optimum.quanto,
-assignment to `Parameter.data` of a `WeightQBytesTensor` SILENTLY KEEPS the
-internal `_data` / `_scale` on the original device. Reproducer:
+In optimum.quanto, `Parameter.data = w.data.to('cpu')` SILENTLY KEEPS the
+underlying `_data` / `_scale` on the original device — the Parameter setter
+has device-preservation logic that undoes the move. Both int8 and fp8 quanto
+tensors hit this. Reproducer in repo history (`internal/audio_iclora_status.md`
+2026-05-27 entry).
 
-    w = quantized_linear.weight    # WeightQBytesTensor on cuda
-    moved = w.data.to('cpu')       # moved._data, moved._scale on CPU (good)
-    w.data = moved                 # w.data.device snaps BACK to cuda:0 (bad)
-    w.data._data = w.data._data.to('cpu')  # also snaps back
+`_move_module_data` below uses **full Parameter replacement via setattr** to
+bypass the trap. Empirically verified across three quant modes (int8, fp8,
+unquantized) by direct repro: the weight ACTUALLY moves, forward succeeds.
 
-So `_move_module_data` below correctly produces a CPU version + assigns it,
-but the Parameter setter undoes the assignment for int8-quant weights. The
-`Block-swap attached: ... (VRAM A -> B)` log shows B nearly equal to A
-because the bulk-storage move is being silently reverted.
+## What this MVP intentionally defers
 
-Three known forward paths (none implemented here yet — needs daylight):
+Pinned memory, FP8 upcast on offload, slab pool, audio-module carve-outs.
+See `internal/block_swap_port_plan.md`. The wrapper + manager + hook
+machinery doesn't need them; they're throughput optimizations.
 
-  1. Switch the trainer's quant to **fp8-quanto** (musubi-tuner's actual
-     target — `.data = ...` reportedly works for fp8 because its tensor
-     wrapping is different). Cheap config-level change once verified.
-  2. **register_parameter("weight", nn.Parameter(moved_data))** to fully
-     unregister + replace the Parameter. Non-trivial: QLinear has fast-paths
-     that may break on re-registration; needs careful testing.
-  3. Use **mmgp** (Wan2GP's library) directly — quanto-aware by construction;
-     skips the Parameter-setter trap. Bigger integration cost.
-
-## What works (the parts we keep)
-
-The MANAGER + WRAPPER + HOOK MACHINERY is correct and survives the int8
-issue. When `_move_module_data` is replaced with one of the three options
-above, the rest of the port should fit together unchanged. The wrapper's
-streaming contract + the backward-hook timing is exercised by 10 unit tests.
-
-Reference port from musubi-tuner's `LTX2BlockSwapManager` (production trainer
-for LTX-2 v2v/av_ic IC-LoRA). This implementation is the MVP — pinned memory,
-FP8 upcast, slab pool, audio-module carve-outs are deferred (see design doc).
+Reference shape from musubi-tuner's `LTX2BlockSwapManager` (production
+trainer for LTX-2 v2v/av_ic IC-LoRA); our `_move_module_data` is the
+correctness fix for the quanto Parameter-setter case they don't trigger
+(musubi targets fp8 with a different load path).
 
 ## The non-obvious correctness point
 
@@ -200,43 +184,48 @@ def attach_block_swap(
 # --- internals -------------------------------------------------------------
 
 
-_LINEAR_QUANT_ATTRS = ("weight", "bias", "scale_weight")  # quanto: weight may be a non-Parameter
-
-
 def _move_module_data(module: nn.Module, device: torch.device) -> None:
-    """Move every weight tensor of `module` to `device` via direct `.data`
-    assignment — bypasses `nn.Module.to()` (which calls `_apply` → `swap`,
-    which fails on optimum.quanto's QLinear).
+    """Move FROZEN weight tensors of `module` to `device` via full Parameter
+    REPLACEMENT (not `.data = ...`).
 
-    The non-obvious correctness point: after `quanto.quantize(model)`, a
-    QLinear's `weight` is REPLACED with a non-`nn.Parameter` custom tensor
-    type. `module.parameters()` skips it entirely — iterating params alone
-    misses the bulk of an int8 model's storage (the 0.32 GB symptom on a
-    22 GB base = parameters() found only the LoRA + norm + embedding params).
-    Combine standard iteration with the explicit quanto attrs musubi uses.
+    The trap this avoids: for optimum.quanto's `WeightQBytesTensor` (int8 OR
+    fp8), `p.data = p.data.to('cpu')` SILENTLY KEEPS the underlying
+    `_data` / `_scale` on the original device. The Parameter setter has
+    device-preservation logic that undoes the move. Empirically verified
+    2026-05-27 by direct repro on a quantized Linear.
 
-    Without this, block-swap looks attached but `memory_allocated()` doesn't
-    drop. With it, the int8 weight tensors actually move."""
-    non_blocking = device.type != "cpu"
+    What works: `setattr(submodule, 'weight', nn.Parameter(moved, ...))`
+    routes through `nn.Module.__setattr__` which DOES honor a full Parameter
+    replacement. Verified end-to-end: weight moves to CPU, back to GPU,
+    forward through the QLinear succeeds with correct device output.
+
+    LoRA caveat: trainable params (`requires_grad=True` — typically the
+    LoRA adapters after PEFT wraps the model) are SKIPPED. Replacing a
+    Parameter orphans its optimizer state (the optimizer keys off Parameter
+    object identity); keeping LoRA on GPU also lets the optimizer step
+    happen on GPU rather than CPU. Matches musubi's `skip_trainable` pattern.
+
+    Buffers (non-Parameter tensors like RMSNorm's running stats) use the
+    plain `.data = ...` path — they don't have the quanto wrapper trap."""
     target = torch.device(device)
+    non_blocking = device.type != "cpu"
     with torch.no_grad():
-        # Standard path: regular Parameters + Buffers (norms, embeddings, biases).
-        for p in module.parameters():
-            p.data = p.data.to(device, non_blocking=non_blocking)
-        for b in module.buffers():
-            b.data = b.data.to(device, non_blocking=non_blocking)
-        # Quanto path: explicit Linear-like attrs, catches the QLinear weight
-        # that's NOT a registered Parameter post-quantization.
         for sub in module.modules():
-            if not sub.__class__.__name__.endswith("Linear"):
-                continue
-            for attr in _LINEAR_QUANT_ATTRS:
-                t = getattr(sub, attr, None)
-                if t is None or not hasattr(t, "data") or not hasattr(t.data, "to"):
+            # Direct (non-recursive) parameters of this submodule. Iterating
+            # at the submodule level + named_parameters(recurse=False) is
+            # important so `setattr(sub, name, ...)` targets the right module.
+            for name, p in list(sub.named_parameters(recurse=False)):
+                if p.requires_grad:
+                    continue  # LoRA / trainable — keep GPU-resident, preserve optimizer state
+                if p.device == target:
                     continue
-                if t.data.device == target:
+                moved = p.to(device, non_blocking=non_blocking)
+                setattr(sub, name, nn.Parameter(moved, requires_grad=False))
+            # Buffers move via the standard .data path.
+            for name, b in list(sub.named_buffers(recurse=False)):
+                if b.device == target:
                     continue
-                t.data = t.data.to(device, non_blocking=non_blocking)
+                b.data = b.data.to(device, non_blocking=non_blocking)
 
 
 def _normalize_device(device: torch.device) -> torch.device:

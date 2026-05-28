@@ -181,6 +181,45 @@ def test_attach_registers_backward_hooks_on_managed_blocks():
     assert len(t.transformer_blocks[0]._backward_hooks) == 0
 
 
+def test_move_module_data_uses_parameter_replacement_not_data_assignment():
+    """Regression test for the optimum.quanto Parameter-setter trap.
+
+    Background: `param.data = param.data.to('cpu')` for a quanto WeightQBytesTensor
+    silently keeps the storage on the original device (the Parameter setter undoes
+    the move). Burned hours diagnosing this — the test locks the working pattern
+    (full Parameter replacement via setattr) so a future refactor doesn't revert
+    to `.data = ...` without us noticing.
+
+    Verified at the API level (not via quanto, which would need GPU): after
+    `_move_module_data` with a real device transition (META→CPU), the
+    submodule's `weight` is a NEW Parameter object (id changed) whose
+    underlying storage lives on the target device. `.data = ...` would keep
+    the SAME Parameter id (it mutates in place)."""
+    from ltx_trainer.block_swap import _move_module_data
+    # Need source != target to bypass the (correct) "already on device" early
+    # return. CPU→META works (META as target is allowed; the reverse,
+    # META→CPU, raises because meta tensors have no data).
+    block = _block()
+    block.weight.requires_grad = False  # base-model case (frozen)
+    original_weight_id = id(block.weight)
+    _move_module_data(block, META)
+    assert id(block.weight) != original_weight_id, \
+        "_move_module_data must REPLACE the Parameter (setattr) not assign .data"
+
+
+def test_move_module_data_skips_trainable_params():
+    """LoRA params (requires_grad=True) must NOT be replaced — replacing a
+    Parameter orphans its optimizer state (the optimizer keys off Parameter
+    object identity). Matches musubi's skip_trainable=True pattern."""
+    from ltx_trainer.block_swap import _move_module_data
+    block = _block()  # CPU source, META target → would fire if not for skip
+    block.weight.requires_grad = True  # simulate a trainable param (LoRA)
+    original_weight_id = id(block.weight)
+    _move_module_data(block, META)
+    assert id(block.weight) == original_weight_id, \
+        "trainable params (requires_grad=True) must be skipped — replacing orphans optimizer state"
+
+
 def test_wrapper_streams_out_even_when_block_raises():
     """The `finally` in wrapper.forward guarantees stream_out even on exception
     — otherwise a single failing forward leaves the block GPU-resident
