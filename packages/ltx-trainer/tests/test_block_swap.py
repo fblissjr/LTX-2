@@ -156,16 +156,37 @@ def test_attach_moves_managed_blocks_to_offload_device():
 
 def test_attach_registers_backward_hooks_on_managed_blocks():
     """Backward pre/post hooks on the inner block handle the
-    recompute→gradient-compute gap. We check that the right NUMBER are
-    registered on the right blocks (the inner ones, not the wrappers)."""
+    recompute→gradient-compute gap. EXACT count is asserted (== 1 each) so a
+    double-attach (e.g., checkpoint resume bug) is caught — duplicate hooks
+    silently double-fire stream_in/out per backward pass."""
     t = _Transformer(n=5)
     attach_block_swap(t, blocks_to_swap=3, offload_device=CPU, compute_device=CPU)
-    # blocks 2, 3, 4 are managed; their inner blocks should each carry
-    # 1 pre-backward + 1 post-backward hook (= 2 entries in their hook dicts).
+    # blocks 2, 3, 4 are managed; inner blocks each carry exactly 1 pre + 1 post.
     for idx in (2, 3, 4):
         inner = t.transformer_blocks[idx].block
-        assert len(inner._backward_pre_hooks) >= 1
-        assert len(inner._backward_hooks) >= 1
+        assert len(inner._backward_pre_hooks) == 1
+        assert len(inner._backward_hooks) == 1
     # Unmanaged blocks have no hooks registered by attach
     assert len(t.transformer_blocks[0]._backward_pre_hooks) == 0
     assert len(t.transformer_blocks[0]._backward_hooks) == 0
+
+
+def test_wrapper_streams_out_even_when_block_raises():
+    """The `finally` in wrapper.forward guarantees stream_out even on exception
+    — otherwise a single failing forward leaves the block GPU-resident
+    permanently and the swap savings degrade silently over time. Locks the
+    contract so a future refactor that drops `finally` is caught."""
+    mgr = _RecordingManager()
+
+    class _Boom(nn.Module):
+        def forward(self, _x):
+            raise RuntimeError("boom")
+    w = StreamingBlockWrapper(_Boom(), mgr, idx=0, compute_device=CPU)
+    try:
+        w(torch.zeros(1))
+    except RuntimeError:
+        pass
+    # Both events fired: stream_in (before block.forward), stream_out (after,
+    # via the finally clause — this is what protects against the leak).
+    kinds = [k for k, _ in mgr.events]
+    assert kinds == ["in", "out"]

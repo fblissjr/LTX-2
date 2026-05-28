@@ -36,8 +36,6 @@ params (musubi's `skip_trainable=True` pattern).
 
 from __future__ import annotations
 
-from typing import Iterable, Optional
-
 import torch
 import torch.nn as nn
 
@@ -165,15 +163,28 @@ def attach_block_swap(
 # --- internals -------------------------------------------------------------
 
 
+def _normalize_device(device: torch.device) -> torch.device:
+    """`torch.device('cuda') != torch.device('cuda:0')` under !=, but they're
+    the same device. Resolve a bare `cuda` to the current indexed device so
+    the stream_in/stream_out short-circuit doesn't miss + cause every forward
+    to re-issue `.to(device)` (silent perf regression that LOOKS like swap is
+    broken in the VRAM logs)."""
+    d = torch.device(device)
+    if d.type == "cuda" and d.index is None:
+        d = torch.device("cuda", torch.cuda.current_device())
+    return d
+
+
 def _module_on_device(module: nn.Module, device: torch.device) -> bool:
-    """True iff every parameter + buffer of `module` is on `device`. Cheap
-    short-circuit prevents redundant .to() (which still allocates briefly)."""
-    target = torch.device(device)
+    """True iff every parameter + buffer of `module` is on `device`. A module
+    with no params/buffers returns True (nothing to move = trivially-resident).
+    Cheap short-circuit prevents redundant .to() (which still allocates briefly)."""
+    target = _normalize_device(device)
     for p in module.parameters():
-        if p.device != target:
+        if _normalize_device(p.device) != target:
             return False
     for b in module.buffers():
-        if b.device != target:
+        if _normalize_device(b.device) != target:
             return False
     return True
 
@@ -198,11 +209,3 @@ def _register_backward_hooks(
     block.register_full_backward_hook(_post)
 
 
-def collect_managed_blocks(
-    transformer: nn.Module,
-) -> Iterable[StreamingBlockWrapper]:
-    """Yield the streaming wrappers currently in transformer.transformer_blocks.
-    For diagnostics + potential cleanup; not needed in the train loop."""
-    for blk in transformer.transformer_blocks:
-        if isinstance(blk, StreamingBlockWrapper):
-            yield blk

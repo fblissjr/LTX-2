@@ -731,7 +731,9 @@ class LtxvTrainer:
         # MUST run AFTER accelerator.prepare — prepare() recursively moves the
         # whole model to the compute device, undoing any prior offload. Attaching
         # after means the wrapper's offload survives. Re-grab the base model since
-        # prepare may have wrapped it (DDP/FSDP).
+        # prepare may have wrapped it (PEFT). Single-GPU 4090 only; multi-GPU
+        # (DDP/FSDP) is untested — backward-hook + grad-reducer ordering on
+        # streamed blocks is not designed for that case.
         if self._config.acceleration.block_swap_blocks > 0:
             from ltx_trainer.block_swap import attach_block_swap
             post_prep = (
@@ -757,9 +759,12 @@ class LtxvTrainer:
             logger.info(msg)
             print(f"[block_swap] {msg}", file=sys.stderr, flush=True)
 
-        # Log GPU memory usage after model preparation
+        # Log GPU memory usage after model preparation + any post-prepare hooks
+        # (block-swap attach is one — if it ran, the number here reflects the
+        # POST-swap resident, not the raw prepare peak; see the [block_swap]
+        # before/after print for the swap delta).
         vram_usage_gb = torch.cuda.memory_allocated() / 1024**3
-        logger.debug(f"GPU memory usage after models preparation: {vram_usage_gb:.2f} GB")
+        logger.debug(f"GPU memory usage after models preparation + post-hooks: {vram_usage_gb:.2f} GB")
 
     @staticmethod
     def _find_checkpoint(checkpoint_path: str | Path) -> Path | None:
