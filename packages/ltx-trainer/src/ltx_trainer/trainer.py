@@ -68,6 +68,26 @@ if not IS_MAIN_PROCESS:
 
 StepCallback = Callable[[int, int, list[Path] | None], None]  # (step, total, sampled paths or None) -> None
 
+
+def _validation_will_run(validation_config) -> bool:
+    """True iff validation will actually fire (interval set + > 0). Codec models
+    (audio VAE, vocoder, video VAE encoder for image conditioning) are
+    validation-only at train time — training reads pre-encoded latents from
+    process_dataset.py. When validation is off, loading them is pure waste of
+    VRAM that an int8 22B base can't afford on a 24 GB card."""
+    return bool(getattr(validation_config, "interval", None))
+
+
+def _offload_frozen_codecs(trainer) -> None:
+    """Move all frozen codecs to CPU during training. The old code did this for
+    the video VAE encoder/decoder only — leaving audio_vae + vocoder resident
+    on GPU. Symmetric offload across video + audio so the asymmetry doesn't
+    silently leak ~700 MB next time a codec gets added."""
+    for attr in ("_vae_decoder", "_vae_encoder", "_audio_vae", "_vocoder"):
+        m = getattr(trainer, attr, None)
+        if m is not None:
+            setattr(trainer, attr, m.to("cpu"))
+
 MEMORY_CHECK_INTERVAL = 200
 
 
@@ -445,10 +465,12 @@ class LtxvTrainer:
 
     def _load_models(self) -> None:
         """Load the LTX-2 model components."""
-        # Load audio components if:
-        # 1. Training strategy requires audio (training the audio branch), OR
-        # 2. Validation is configured to generate audio (even if not training audio)
-        load_audio = self._training_strategy.requires_audio or self._config.validation.generate_audio
+        # Audio VAE decoder + vocoder are VALIDATION-ONLY at train time — training
+        # reads pre-encoded audio latents (process_dataset.py runs the audio VAE
+        # upfront). The old gate (`requires_audio or generate_audio`) over-loaded
+        # whenever the strategy used audio data, wasting ~700 MB on a 24 GB card.
+        # Gate on "validation will actually run AND it will decode audio."
+        load_audio = _validation_will_run(self._config.validation) and self._config.validation.generate_audio
 
         # Check if we need VAE encoder (for image or reference video conditioning)
         need_vae_encoder = (
@@ -692,10 +714,10 @@ class LtxvTrainer:
 
         transformer.set_gradient_checkpointing(self._config.optimization.enable_gradient_checkpointing)
 
-        # Keep frozen models on CPU for memory efficiency
-        self._vae_decoder = self._vae_decoder.to("cpu")
-        if self._vae_encoder is not None:
-            self._vae_encoder = self._vae_encoder.to("cpu")
+        # Keep frozen codecs on CPU during training; resurrected for validation.
+        # Symmetric across video + audio — leaking audio_vae/vocoder on GPU was the
+        # subtle bug that made an int8 22B miss a 32 MiB allocation on a 24 GB card.
+        _offload_frozen_codecs(self)
 
         # Embedding connectors are already on GPU from _load_text_encoder_and_cache_embeddings
 
