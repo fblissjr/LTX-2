@@ -1,9 +1,40 @@
 """Block-swap — stream transformer blocks GPU<->CPU during forward + backward
-so an int8 22B base fits training on a 24 GB 4090.
+so a large base fits training on a 24 GB 4090.
 
-The 22B int8-quanto base alone allocates ~22.97 GB on a 4090 (E0.2 verdict);
-no activation headroom. With N of M blocks swapped out, peak resident base
-scales to ≈ (M-N)/M × base_size.
+## STATUS: INCOMPLETE for int8-quanto (the immediate target)
+
+Despite engaging without error, this MVP moves only ~0.3 GB of a 22 GB int8
+base. Root cause empirically isolated 2026-05-27 late: in optimum.quanto,
+assignment to `Parameter.data` of a `WeightQBytesTensor` SILENTLY KEEPS the
+internal `_data` / `_scale` on the original device. Reproducer:
+
+    w = quantized_linear.weight    # WeightQBytesTensor on cuda
+    moved = w.data.to('cpu')       # moved._data, moved._scale on CPU (good)
+    w.data = moved                 # w.data.device snaps BACK to cuda:0 (bad)
+    w.data._data = w.data._data.to('cpu')  # also snaps back
+
+So `_move_module_data` below correctly produces a CPU version + assigns it,
+but the Parameter setter undoes the assignment for int8-quant weights. The
+`Block-swap attached: ... (VRAM A -> B)` log shows B nearly equal to A
+because the bulk-storage move is being silently reverted.
+
+Three known forward paths (none implemented here yet — needs daylight):
+
+  1. Switch the trainer's quant to **fp8-quanto** (musubi-tuner's actual
+     target — `.data = ...` reportedly works for fp8 because its tensor
+     wrapping is different). Cheap config-level change once verified.
+  2. **register_parameter("weight", nn.Parameter(moved_data))** to fully
+     unregister + replace the Parameter. Non-trivial: QLinear has fast-paths
+     that may break on re-registration; needs careful testing.
+  3. Use **mmgp** (Wan2GP's library) directly — quanto-aware by construction;
+     skips the Parameter-setter trap. Bigger integration cost.
+
+## What works (the parts we keep)
+
+The MANAGER + WRAPPER + HOOK MACHINERY is correct and survives the int8
+issue. When `_move_module_data` is replaced with one of the three options
+above, the rest of the port should fit together unchanged. The wrapper's
+streaming contract + the backward-hook timing is exercised by 10 unit tests.
 
 Reference port from musubi-tuner's `LTX2BlockSwapManager` (production trainer
 for LTX-2 v2v/av_ic IC-LoRA). This implementation is the MVP — pinned memory,
