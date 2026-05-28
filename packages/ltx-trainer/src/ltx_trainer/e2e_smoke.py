@@ -79,6 +79,7 @@ def make_smoke_train_config(
     steps: int,
     model_path: str | None = None,
     text_encoder_path: str | None = None,
+    reference_video: str | None = None,
 ) -> dict:
     """Override a REAL base config for the smoke: point it at the smoke dataset +
     the model/Gemma, cap steps, set the output dir, and FORCE the audio-guided v2v
@@ -100,6 +101,14 @@ def make_smoke_train_config(
     ts["with_audio"] = True
     ts.setdefault("audio_mode", "condition")
     cfg["training_strategy"] = ts
+    # v2v REQUIRES validation.reference_videos (a cross-field check) even when validation
+    # is disabled. Provide a reference + set interval=None so the short smoke just trains
+    # and never runs a full validation inference (which would need the upscaler etc).
+    val = {**cfg.get("validation", {}), "interval": None}
+    if reference_video:
+        val["reference_videos"] = [reference_video]
+        val["prompts"] = [(val.get("prompts") or ["a shape"])[0]]  # 1 prompt to match 1 reference
+    cfg["validation"] = val
     # write a checkpoint within the short smoke (base interval may be large or null)
     cfg["checkpoints"] = {**cfg.get("checkpoints", {}), "interval": int(steps)}
     return cfg
@@ -211,9 +220,13 @@ def run_smoke(
         print(f"  {precomputed}")
         return
     out_dir = workdir / "smoke_out"
+    # v2v needs a validation reference video — use the first dataset clip (validation
+    # runs are disabled in the smoke config, this just satisfies the cross-field check).
+    cap_rows = json.loads(Path(captions_path).read_text())
+    ref_video = str((Path(captions_path).parent / cap_rows[0]["video"]).resolve()) if cap_rows else None
     smoke_cfg = make_smoke_train_config(
         yaml.safe_load(Path(base_config).read_text()), str(precomputed), str(out_dir), steps,
-        model_path=model_path, text_encoder_path=text_encoder_path)
+        model_path=model_path, text_encoder_path=text_encoder_path, reference_video=ref_video)
     cfg_path = workdir / "smoke_config.yaml"
     cfg_path.write_text(yaml.safe_dump(smoke_cfg))
     _run([py, str(scripts / "train.py"), str(cfg_path)], "TRAIN")
