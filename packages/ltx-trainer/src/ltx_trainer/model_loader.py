@@ -70,6 +70,20 @@ def _materialize_meta_buffers(model, checkpoint_path: str | Path, device: torch.
     return model
 
 
+def _build_and_materialize(configurator, sd_ops, checkpoint_path: str | Path, device: Device, dtype: torch.dtype):
+    """Build a VAE submodel from the checkpoint, then restore any meta buffers the
+    COMFY keys filter skipped (per-channel stats). Shared by the four VAE loaders."""
+    from ltx_core.loader import SingleGPUModelBuilder
+
+    dev = _to_torch_device(device)
+    model = SingleGPUModelBuilder(
+        model_path=str(checkpoint_path),
+        model_class_configurator=configurator,
+        model_sd_ops=sd_ops,
+    ).build(device=dev, dtype=dtype)
+    return _materialize_meta_buffers(model, checkpoint_path, dev, dtype)
+
+
 # =============================================================================
 # Individual Component Loaders
 # =============================================================================
@@ -114,16 +128,9 @@ def load_video_vae_encoder(
     Returns:
         Loaded VideoEncoder
     """
-    from ltx_core.loader.single_gpu_model_builder import SingleGPUModelBuilder
     from ltx_core.model.video_vae import VAE_ENCODER_COMFY_KEYS_FILTER, VideoEncoderConfigurator
 
-    dev = _to_torch_device(device)
-    model = SingleGPUModelBuilder(
-        model_path=str(checkpoint_path),
-        model_class_configurator=VideoEncoderConfigurator,
-        model_sd_ops=VAE_ENCODER_COMFY_KEYS_FILTER,
-    ).build(device=dev, dtype=dtype)
-    return _materialize_meta_buffers(model, checkpoint_path, dev, dtype)
+    return _build_and_materialize(VideoEncoderConfigurator, VAE_ENCODER_COMFY_KEYS_FILTER, checkpoint_path, device, dtype)
 
 
 def load_video_vae_decoder(
@@ -139,16 +146,9 @@ def load_video_vae_decoder(
     Returns:
         Loaded VideoDecoder
     """
-    from ltx_core.loader.single_gpu_model_builder import SingleGPUModelBuilder
     from ltx_core.model.video_vae import VAE_DECODER_COMFY_KEYS_FILTER, VideoDecoderConfigurator
 
-    dev = _to_torch_device(device)
-    model = SingleGPUModelBuilder(
-        model_path=str(checkpoint_path),
-        model_class_configurator=VideoDecoderConfigurator,
-        model_sd_ops=VAE_DECODER_COMFY_KEYS_FILTER,
-    ).build(device=dev, dtype=dtype)
-    return _materialize_meta_buffers(model, checkpoint_path, dev, dtype)
+    return _build_and_materialize(VideoDecoderConfigurator, VAE_DECODER_COMFY_KEYS_FILTER, checkpoint_path, device, dtype)
 
 
 def load_audio_vae_encoder(
@@ -164,16 +164,9 @@ def load_audio_vae_encoder(
     Returns:
         Loaded AudioEncoder
     """
-    from ltx_core.loader import SingleGPUModelBuilder
     from ltx_core.model.audio_vae import AUDIO_VAE_ENCODER_COMFY_KEYS_FILTER, AudioEncoderConfigurator
 
-    dev = _to_torch_device(device)
-    model = SingleGPUModelBuilder(
-        model_path=str(checkpoint_path),
-        model_class_configurator=AudioEncoderConfigurator,
-        model_sd_ops=AUDIO_VAE_ENCODER_COMFY_KEYS_FILTER,
-    ).build(device=dev, dtype=dtype)
-    return _materialize_meta_buffers(model, checkpoint_path, dev, dtype)
+    return _build_and_materialize(AudioEncoderConfigurator, AUDIO_VAE_ENCODER_COMFY_KEYS_FILTER, checkpoint_path, device, dtype)
 
 
 def load_audio_vae_decoder(
@@ -189,16 +182,9 @@ def load_audio_vae_decoder(
     Returns:
         Loaded AudioDecoder
     """
-    from ltx_core.loader import SingleGPUModelBuilder
     from ltx_core.model.audio_vae import AUDIO_VAE_DECODER_COMFY_KEYS_FILTER, AudioDecoderConfigurator
 
-    dev = _to_torch_device(device)
-    model = SingleGPUModelBuilder(
-        model_path=str(checkpoint_path),
-        model_class_configurator=AudioDecoderConfigurator,
-        model_sd_ops=AUDIO_VAE_DECODER_COMFY_KEYS_FILTER,
-    ).build(device=dev, dtype=dtype)
-    return _materialize_meta_buffers(model, checkpoint_path, dev, dtype)
+    return _build_and_materialize(AudioDecoderConfigurator, AUDIO_VAE_DECODER_COMFY_KEYS_FILTER, checkpoint_path, device, dtype)
 
 
 def load_vocoder(
