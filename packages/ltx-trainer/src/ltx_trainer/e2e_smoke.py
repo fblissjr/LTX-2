@@ -116,6 +116,8 @@ def run_smoke(
     resolution_bucket: str = "256x256x25",  # synthetic CLIP spec: W x H x FPS
     duration_s: float = 3.0,
     dataset_bucket: str | None = None,  # process_dataset WxH×FRAMES; required for real --captions
+    model_path: str | None = None,  # single-file LTX-2 checkpoint (VAEs + projectors)
+    text_encoder_path: str | None = None,  # Gemma dir
     base_config: Path | None = None,
     steps: int = 3,
     python: str | None = None,
@@ -158,12 +160,20 @@ def run_smoke(
             )
         bucket = dataset_bucket
 
+    if not model_path or not text_encoder_path:
+        raise SmokeGateError(
+            "PRECOMPUTE needs --model-path (single-file LTX-2 checkpoint with VAEs+projectors) "
+            "and --text-encoder-path (Gemma dir). On a ComfyUI split-file setup, point --model-path "
+            "at the full Lightricks ltx-2.3-22b-distilled-1.1.safetensors."
+        )
+
     precomputed = workdir / "precomputed"
 
     # PRECOMPUTE (real)
     _run(
         [py, str(scripts / "process_dataset.py"), str(captions_path),
          "--output-dir", str(precomputed), "--with-audio",
+         "--model-path", str(model_path), "--text-encoder-path", str(text_encoder_path),
          "--resolution-buckets", bucket,
          "--reference-column", "reference", "--caption-column", "caption", "--video-column", "video"],
         "PRECOMPUTE",
