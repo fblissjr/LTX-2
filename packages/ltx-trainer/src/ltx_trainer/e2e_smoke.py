@@ -98,12 +98,24 @@ def _run(cmd: list[str], stage: str) -> None:
         raise SmokeGateError(f"{stage} command failed (exit {proc.returncode}). See its output above.")
 
 
+def synthetic_dataset_bucket(width: int, height: int, fps: int, duration_s: float) -> str:
+    """process_dataset --resolution-buckets is WxH×FRAMES (a frame count, e.g.
+    57/89/121 — all 8k+1), NOT WxH×fps. Derive the frame count the synthetic
+    generator actually produces (snapped to 8k+1) so the bucket matches the clips;
+    passing fps as the third field would mis-bucket them."""
+    from ltx_trainer.synthetic_av import snap_frames_to_8k1
+
+    return f"{width}x{height}x{snap_frames_to_8k1(round(duration_s * fps))}"
+
+
 def run_smoke(
     *,
     workdir: Path,
     n_clips: int = 4,
     captions_path: Path | None = None,
-    resolution_bucket: str = "256x256x25",
+    resolution_bucket: str = "256x256x25",  # synthetic CLIP spec: W x H x FPS
+    duration_s: float = 3.0,
+    dataset_bucket: str | None = None,  # process_dataset WxH×FRAMES; required for real --captions
     base_config: Path | None = None,
     steps: int = 3,
     python: str | None = None,
@@ -122,19 +134,29 @@ def run_smoke(
     py = python or sys.executable
     scripts = Path(__file__).resolve().parents[2] / "scripts"
 
+    w, h, fps = (int(x) for x in resolution_bucket.split("x"))  # clip spec: W x H x FPS
+
     # GEN
     if captions_path is None:
         from ltx_trainer.synthetic_av import generate_dataset
 
-        w, h, fps = (int(x) for x in resolution_bucket.split("x"))
-        print(f"=== GEN: {n_clips} synthetic beat→pulse clips ({w}x{h}@{fps}) ===", flush=True)
-        captions_path = generate_dataset(workdir, n_clips, fps=fps, width=w, height=h)
+        print(f"=== GEN: {n_clips} synthetic beat→pulse clips ({w}x{h}@{fps}fps, {duration_s}s) ===", flush=True)
+        captions_path = generate_dataset(workdir, n_clips, fps=fps, width=w, height=h, duration_s=duration_s)
         # Smoke uses the clip as its own reference (valid for an integration check;
         # real audio→video training wants a STATIC reference — see data plan §1.2).
         rows = json.loads(Path(captions_path).read_text())
         for r in rows:
             r["reference"] = r["video"]
         Path(captions_path).write_text(json.dumps(rows, indent=2))
+        # process_dataset buckets by FRAME COUNT, not fps — derive it from the clips.
+        bucket = dataset_bucket or synthetic_dataset_bucket(w, h, fps, duration_s)
+    else:
+        if dataset_bucket is None:
+            raise SmokeGateError(
+                "real --captions requires --dataset-bucket WxHxFRAMES (process_dataset buckets by "
+                "frame count, not fps — e.g. 256x256x73 for ~3s @ 25fps)."
+            )
+        bucket = dataset_bucket
 
     precomputed = workdir / "precomputed"
 
@@ -142,7 +164,7 @@ def run_smoke(
     _run(
         [py, str(scripts / "process_dataset.py"), str(captions_path),
          "--output-dir", str(precomputed), "--with-audio",
-         "--resolution-buckets", resolution_bucket,
+         "--resolution-buckets", bucket,
          "--reference-column", "reference", "--caption-column", "caption", "--video-column", "video"],
         "PRECOMPUTE",
     )

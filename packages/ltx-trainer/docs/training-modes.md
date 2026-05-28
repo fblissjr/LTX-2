@@ -138,6 +138,53 @@ training_strategy:
 
 - 📄 [IC-LoRA Training](../configs/ltx2_v2v_ic_lora.yaml) - Video-to-video transformation training
 
+### Audio-guided IC-LoRA (audio drives video)
+
+The `video_to_video` strategy also accepts audio, so the IC-LoRA can learn an
+**audio→video guidance** relationship (LTX-2 is a joint audio-video model). Three
+modes via `audio_mode`:
+
+- **`condition`** (default) — audio is **clean context** (the guide); video is the
+  noised target; loss on video only. The model learns to make the generated video
+  follow the audio (lip-sync, beat-reactive motion, foley). This is "audio guides
+  video."
+- **`generate`** — audio noised + in the loss (joint AV generation; same as the
+  `text_to_video` audio path).
+- **`continuation`** — audio prefix kept clean + tail generated (loss on the tail),
+  video frozen — the training analog of video→audio inversion. `audio_prefix_seconds`
+  sets the seed length.
+
+```yaml
+model:
+  training_mode: "lora"
+
+training_strategy:
+  name: "video_to_video"
+  with_audio: true
+  audio_mode: "condition"        # condition | generate | continuation
+  audio_latents_dir: "audio_latents"
+  # audio_prefix_seconds: 2.0    # only for audio_mode: continuation
+```
+
+Requires `audio_latents/` in the precomputed data (run `process_dataset.py
+--with-audio`). `with_audio: false` is byte-identical to the original video-only
+IC-LoRA. For target modules, include the audio + cross-modal branches (see the
+IMPORTANT note above); the published ID-LoRA recipe also targets the **audio FFN**
+layers at rank 128 — worth including for stronger audio coupling.
+
+**Tooling for this path** (all under `scripts/`):
+
+- `verify_codecs.py` — round-trip check that the video/audio VAEs + Gemma recover
+  their input (run before trusting precomputed latents).
+- `verify_training_data.py` — validate the precomputed dataset (shapes, the
+  silent-intersection count gap, audio↔video alignment) before a GPU run.
+- `generate_synthetic_av_data.py` — procedural beat→pulse clips with a known,
+  measurable coupling, for proving the mechanism without footage.
+- `run_e2e_smoke.py` — drive the whole pipeline (gen → precompute → validate →
+  train) end to end with fact-based gates.
+- `run_audio_coupling_eval.py` — objective A/B eval: does the LoRA make the video
+  track the audio more than the no-LoRA baseline?
+
 ### Dataset Requirements for IC-LoRA
 
 - Your dataset must contain **paired videos** where each target video has a corresponding reference video

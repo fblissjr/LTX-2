@@ -29,7 +29,10 @@ def main() -> None:
     ap.add_argument("--workdir", required=True, help="Scratch dir for generated data + precompute + smoke output")
     ap.add_argument("--n-clips", type=int, default=4, help="Synthetic clips to generate (ignored if --captions)")
     ap.add_argument("--captions", type=Path, default=None, help="Use a real captions json instead of synthetic")
-    ap.add_argument("--resolution-bucket", default="256x256x25", help="WxHxFrames bucket for precompute")
+    ap.add_argument("--resolution-bucket", default="256x256x25", help="Synthetic clip spec: WxHxFPS (NOT frames)")
+    ap.add_argument("--duration", type=float, default=3.0, help="Synthetic clip length in seconds")
+    ap.add_argument("--dataset-bucket", default=None,
+                    help="process_dataset WxHxFRAMES bucket (REQUIRED with --captions; derived for synthetic)")
     ap.add_argument("--base-config", type=Path, default=None, help="Real train YAML to step-cap for the train smoke")
     ap.add_argument("--steps", type=int, default=3, help="Training steps for the smoke")
     args = ap.parse_args()
@@ -37,7 +40,8 @@ def main() -> None:
     try:
         run_smoke(
             workdir=args.workdir, n_clips=args.n_clips, captions_path=args.captions,
-            resolution_bucket=args.resolution_bucket, base_config=args.base_config, steps=args.steps,
+            resolution_bucket=args.resolution_bucket, duration_s=args.duration,
+            dataset_bucket=args.dataset_bucket, base_config=args.base_config, steps=args.steps,
         )
     except SmokeGateError as e:
         raise SystemExit(f"\nSMOKE FAILED at a gate:\n{e}") from e

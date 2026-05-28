@@ -15,7 +15,18 @@ from ltx_trainer.e2e_smoke import (
     gate_sources_present,
     gate_validation,
     make_smoke_train_config,
+    synthetic_dataset_bucket,
 )
+
+
+def test_synthetic_dataset_bucket_is_frames_not_fps():
+    """process_dataset buckets by FRAME COUNT; the bucket must be WxHx<frames>,
+    derived from fps*duration (snapped to 8k+1), NOT the fps value."""
+    # 25fps * 3s = 75 -> snap to 73 (8k+1). Must NOT be the fps (25).
+    assert synthetic_dataset_bucket(256, 256, 25, 3.0) == "256x256x73"
+    # frame count is 8k+1
+    w, h, n = synthetic_dataset_bucket(320, 192, 24, 4.0).split("x")
+    assert (int(n) - 1) % 8 == 0 and (w, h) == ("320", "192")
 
 
 def _touch(p):
