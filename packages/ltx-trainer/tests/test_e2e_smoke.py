@@ -66,7 +66,7 @@ def test_make_smoke_train_config_overrides():
     base = {
         "model": {"model_path": "x", "training_mode": "lora"},
         "data": {"preprocessed_data_root": "OLD"},
-        "training": {"steps": 5000, "batch_size": 1},
+        "optimization": {"steps": 5000, "batch_size": 1},  # steps lives under optimization, not training
         "training_strategy": {"name": "text_to_video", "first_frame_conditioning_p": 0.1},  # base may be t2v
         "output_dir": "OLD",
         "checkpoints": {"interval": 250},
@@ -74,8 +74,8 @@ def test_make_smoke_train_config_overrides():
     cfg = make_smoke_train_config(base, preprocessed_root="NEW", output_dir="OUT", steps=3,
                                   model_path="CKPT", text_encoder_path="GEMMA")
     assert cfg["data"]["preprocessed_data_root"] == "NEW"
-    assert cfg["training"]["steps"] == 3
-    assert cfg["training"]["batch_size"] == 1  # preserved
+    assert cfg["optimization"]["steps"] == 3
+    assert cfg["optimization"]["batch_size"] == 1  # preserved
     assert cfg["output_dir"] == "OUT"
     assert cfg["training_strategy"]["name"] == "video_to_video"  # FORCED (was text_to_video)
     assert cfg["training_strategy"]["with_audio"] is True

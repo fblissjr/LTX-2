@@ -93,7 +93,7 @@ def make_smoke_train_config(
             m["text_encoder_path"] = text_encoder_path
         cfg["model"] = m
     cfg["data"] = {**cfg.get("data", {}), "preprocessed_data_root": preprocessed_root}
-    cfg["training"] = {**cfg.get("training", {}), "steps": int(steps)}
+    cfg["optimization"] = {**cfg.get("optimization", {}), "steps": int(steps)}  # steps lives under optimization
     cfg["output_dir"] = output_dir
     ts = {**cfg.get("training_strategy", {})}
     ts["name"] = "video_to_video"  # FORCE — base may be text_to_video; we want audio-guided v2v
