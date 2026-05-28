@@ -2,6 +2,7 @@ import contextlib
 import math
 import os
 import re
+import sys
 import time
 import warnings
 from collections.abc import Iterator
@@ -714,25 +715,6 @@ class LtxvTrainer:
 
         transformer.set_gradient_checkpointing(self._config.optimization.enable_gradient_checkpointing)
 
-        # Block-swap (acceleration.block_swap_blocks > 0): stream the last N
-        # transformer blocks GPU<->CPU during forward + backward so the int8 22B
-        # base fits on a 24 GB 4090 (E0.2 verdict: ~22.97 GB resident with 0 swap).
-        # Must be applied AFTER gradient_checkpointing setup so the wrappers see
-        # the same iteration target the checkpoint() call wraps, and BEFORE
-        # accelerator.prepare so Accelerate sees the wrapped ModuleList.
-        if self._config.acceleration.block_swap_blocks > 0:
-            from ltx_trainer.block_swap import attach_block_swap
-            mgr = attach_block_swap(
-                transformer,
-                blocks_to_swap=self._config.acceleration.block_swap_blocks,
-                offload_device=torch.device("cpu"),
-                compute_device=self._accelerator.device,
-            )
-            logger.info(
-                "Block-swap attached: %d/%d transformer blocks streamed CPU<->GPU",
-                mgr.blocks_to_swap, len(transformer.transformer_blocks),
-            )
-
         # Keep frozen codecs on CPU during training; resurrected for validation.
         # Symmetric across video + audio — leaking audio_vae/vocoder on GPU was the
         # subtle bug that made an int8 22B miss a 32 MiB allocation on a 24 GB card.
@@ -742,6 +724,38 @@ class LtxvTrainer:
 
         # noinspection PyTypeChecker
         self._transformer = self._accelerator.prepare(self._transformer)
+
+        # Block-swap (acceleration.block_swap_blocks > 0): stream the last N
+        # transformer blocks GPU<->CPU during forward + backward so the int8 22B
+        # base fits on a 24 GB 4090 (E0.2 verdict: ~22.97 GB resident with 0 swap).
+        # MUST run AFTER accelerator.prepare — prepare() recursively moves the
+        # whole model to the compute device, undoing any prior offload. Attaching
+        # after means the wrapper's offload survives. Re-grab the base model since
+        # prepare may have wrapped it (DDP/FSDP).
+        if self._config.acceleration.block_swap_blocks > 0:
+            from ltx_trainer.block_swap import attach_block_swap
+            post_prep = (
+                self._transformer.get_base_model()
+                if hasattr(self._transformer, "get_base_model")
+                else self._transformer
+            )
+            before_gb = torch.cuda.memory_allocated() / 1024**3 if torch.cuda.is_available() else 0.0
+            mgr = attach_block_swap(
+                post_prep,
+                blocks_to_swap=self._config.acceleration.block_swap_blocks,
+                offload_device=torch.device("cpu"),
+                compute_device=self._accelerator.device,
+            )
+            after_gb = torch.cuda.memory_allocated() / 1024**3 if torch.cuda.is_available() else 0.0
+            # Use logger AND stderr-print: trainer log filtering can hide INFO; the
+            # print guarantees visibility for "did it actually fire" diagnostics.
+            msg = (
+                f"Block-swap attached: {mgr.blocks_to_swap}/"
+                f"{len(post_prep.transformer_blocks)} blocks streamed CPU<->GPU "
+                f"(VRAM {before_gb:.2f} -> {after_gb:.2f} GB)"
+            )
+            logger.info(msg)
+            print(f"[block_swap] {msg}", file=sys.stderr, flush=True)
 
         # Log GPU memory usage after model preparation
         vram_usage_gb = torch.cuda.memory_allocated() / 1024**3
