@@ -161,6 +161,12 @@ def attach_block_swap(
         if not manager.is_managed(idx):
             continue
         inner = blocks[idx]
+        # Double-attach guard (/simplify finding #3): if the block is already
+        # wrapped (re-entry through a future validation-prep or hot-reload
+        # path), wrapping again would silently duplicate hooks → double-fire
+        # stream_in/out per backward. Cheap structural check.
+        if isinstance(inner, StreamingBlockWrapper):
+            continue
         # Stream out the inner block first (so subsequent .to inside the
         # wrapper has the correct starting device).
         manager.stream_out(inner)
@@ -207,7 +213,12 @@ def _move_module_data(module: nn.Module, device: torch.device) -> None:
 
     Buffers (non-Parameter tensors like RMSNorm's running stats) use the
     plain `.data = ...` path — they don't have the quanto wrapper trap."""
-    target = torch.device(device)
+    # _normalize_device + indexed-param comparison: `torch.device('cuda')` and
+    # `torch.device('cuda:0')` are NOT equal under ==, so the early-return
+    # short-circuit silently misses when the compute device is bare 'cuda'.
+    # /simplify finding #1 — without this, every wrapper.forward re-walks the
+    # full parameter list and re-issues .to() even when the block is resident.
+    target = _normalize_device(torch.device(device))
     non_blocking = device.type != "cpu"
     with torch.no_grad():
         for sub in module.modules():
@@ -217,13 +228,13 @@ def _move_module_data(module: nn.Module, device: torch.device) -> None:
             for name, p in list(sub.named_parameters(recurse=False)):
                 if p.requires_grad:
                     continue  # LoRA / trainable — keep GPU-resident, preserve optimizer state
-                if p.device == target:
+                if _normalize_device(p.device) == target:
                     continue
                 moved = p.to(device, non_blocking=non_blocking)
                 setattr(sub, name, nn.Parameter(moved, requires_grad=False))
             # Buffers move via the standard .data path.
             for name, b in list(sub.named_buffers(recurse=False)):
-                if b.device == target:
+                if _normalize_device(b.device) == target:
                     continue
                 b.data = b.data.to(device, non_blocking=non_blocking)
 
@@ -243,7 +254,10 @@ def _normalize_device(device: torch.device) -> torch.device:
 def _module_on_device(module: nn.Module, device: torch.device) -> bool:
     """True iff every parameter + buffer of `module` is on `device`. A module
     with no params/buffers returns True (nothing to move = trivially-resident).
-    Cheap short-circuit prevents redundant .to() (which still allocates briefly)."""
+
+    Cost: O(params) walk on every call — acceptable for MVP since the typical
+    pattern is "skip when already there." For v2 we'd cache the per-block
+    device on the manager; defer until profiling shows it matters."""
     target = _normalize_device(device)
     for p in module.parameters():
         if _normalize_device(p.device) != target:

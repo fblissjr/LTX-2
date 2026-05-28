@@ -136,11 +136,13 @@ def test_attach_with_zero_returns_no_op_manager():
 
 def test_attach_calls_stream_out_on_managed_blocks(monkeypatch):
     """attach() must call manager.stream_out on managed blocks (so they end up
-    on the offload device). Spied because the actual move uses
-    `param.data = param.data.to(...)` (the only way around quanto's QLinear
-    rejecting `nn.Module.to()`), which can't target META on a CPU-only test
-    environment — set_data rejects the type mismatch. Verifying the CALL
-    instead of the post-move device is the right behavioral test here."""
+    on the offload device). Spied because the actual move uses full
+    `setattr(sub, name, nn.Parameter(...))` Parameter replacement (the only
+    way around optimum.quanto's `Parameter.data = ...` snap-back trap), and a
+    real device-move can't target META cleanly on a CPU-only test environment.
+    Verifying the CALL instead of the post-move device is the right
+    behavioral test here — the move mechanism is locked separately by
+    test_move_module_data_uses_parameter_replacement_not_data_assignment."""
     t = _Transformer(n=4)
     streamed_out: list[nn.Module] = []
 

@@ -2,7 +2,6 @@ import contextlib
 import math
 import os
 import re
-import sys
 import time
 import warnings
 from collections.abc import Iterator
@@ -749,15 +748,16 @@ class LtxvTrainer:
                 compute_device=self._accelerator.device,
             )
             after_gb = torch.cuda.memory_allocated() / 1024**3 if torch.cuda.is_available() else 0.0
-            # Use logger AND stderr-print: trainer log filtering can hide INFO; the
-            # print guarantees visibility for "did it actually fire" diagnostics.
-            msg = (
-                f"Block-swap attached: {mgr.blocks_to_swap}/"
-                f"{len(post_prep.transformer_blocks)} blocks streamed CPU<->GPU "
-                f"(VRAM {before_gb:.2f} -> {after_gb:.2f} GB)"
+            # WARNING-level: needs to survive any INFO filtering downstream;
+            # block-swap engagement is non-trivial state the trainer should
+            # announce loudly. (Earlier debug used a duplicate stderr print
+            # too; /simplify dropped it — the WARNING level is enough.)
+            logger.warning(
+                "Block-swap attached: %d/%d blocks streamed CPU<->GPU "
+                "(VRAM %.2f -> %.2f GB)",
+                mgr.blocks_to_swap, len(post_prep.transformer_blocks),
+                before_gb, after_gb,
             )
-            logger.info(msg)
-            print(f"[block_swap] {msg}", file=sys.stderr, flush=True)
 
         # Log GPU memory usage after model preparation + any post-prepare hooks
         # (block-swap attach is one — if it ran, the number here reflects the
