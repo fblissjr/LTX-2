@@ -714,6 +714,25 @@ class LtxvTrainer:
 
         transformer.set_gradient_checkpointing(self._config.optimization.enable_gradient_checkpointing)
 
+        # Block-swap (acceleration.block_swap_blocks > 0): stream the last N
+        # transformer blocks GPU<->CPU during forward + backward so the int8 22B
+        # base fits on a 24 GB 4090 (E0.2 verdict: ~22.97 GB resident with 0 swap).
+        # Must be applied AFTER gradient_checkpointing setup so the wrappers see
+        # the same iteration target the checkpoint() call wraps, and BEFORE
+        # accelerator.prepare so Accelerate sees the wrapped ModuleList.
+        if self._config.acceleration.block_swap_blocks > 0:
+            from ltx_trainer.block_swap import attach_block_swap
+            mgr = attach_block_swap(
+                transformer,
+                blocks_to_swap=self._config.acceleration.block_swap_blocks,
+                offload_device=torch.device("cpu"),
+                compute_device=self._accelerator.device,
+            )
+            logger.info(
+                "Block-swap attached: %d/%d transformer blocks streamed CPU<->GPU",
+                mgr.blocks_to_swap, len(transformer.transformer_blocks),
+            )
+
         # Keep frozen codecs on CPU during training; resurrected for validation.
         # Symmetric across video + audio — leaking audio_vae/vocoder on GPU was the
         # subtle bug that made an int8 22B miss a 32 MiB allocation on a 24 GB card.

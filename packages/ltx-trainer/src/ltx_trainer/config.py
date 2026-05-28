@@ -177,6 +177,15 @@ class AccelerationConfig(ConfigBaseModel):
         "for FSDP (sharded state). Disabled by default.",
     )
 
+    block_swap_blocks: int = Field(
+        default=0,
+        description="Stream the last N transformer blocks GPU<->CPU during forward + backward to "
+        "fit large bases on small VRAM. 0 disables (default). For LTX-2 22B int8 on a 24 GB 4090: "
+        "the base alone is ~22.97 GB resident with 0 swap (no activation headroom); ~30-40 of 48 "
+        "blocks swapped frees ~14-18 GB. Per-step cost is the GPU<->CPU PCIe transfer of swapped "
+        "blocks. See ltx_trainer.block_swap.",
+    )
+
 
 class DataConfig(ConfigBaseModel):
     """Configuration for data loading and processing"""
