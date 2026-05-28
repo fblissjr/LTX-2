@@ -82,16 +82,14 @@ class BlockSwapManager:
         wrapper's forward + the pre-backward hook on the inner block."""
         if _module_on_device(block, compute_device):
             return
-        with torch.no_grad():
-            block.to(compute_device)
+        _move_module_data(block, compute_device)
 
     def stream_out(self, block: nn.Module) -> None:
         """Move block to offload device. Called by the wrapper's forward AFTER
         the inner forward + the post-backward hook AFTER gradient computation."""
         if _module_on_device(block, self._offload_device):
             return
-        with torch.no_grad():
-            block.to(self._offload_device)
+        _move_module_data(block, self._offload_device)
 
 
 class StreamingBlockWrapper(nn.Module):
@@ -157,10 +155,57 @@ def attach_block_swap(
         _register_backward_hooks(inner, manager, compute_device)
         # Replace in place. ModuleList supports __setitem__.
         blocks[idx] = StreamingBlockWrapper(inner, manager, idx, compute_device)
+    # CRITICAL: empty the CUDA caching allocator. Param `.data = .to('cpu')`
+    # releases the GPU storage reference, but PyTorch's allocator caches the
+    # freed memory in its reserved-but-unallocated pool instead of returning
+    # it to the OS. Without empty_cache, the freed VRAM isn't observable by
+    # other processes/allocations and the block-swap delta looks like a no-op
+    # in nvidia-smi / memory_allocated. Cheap (one call at attach time).
+    if compute_device.type == "cuda":
+        torch.cuda.empty_cache()
     return manager
 
 
 # --- internals -------------------------------------------------------------
+
+
+_LINEAR_QUANT_ATTRS = ("weight", "bias", "scale_weight")  # quanto: weight may be a non-Parameter
+
+
+def _move_module_data(module: nn.Module, device: torch.device) -> None:
+    """Move every weight tensor of `module` to `device` via direct `.data`
+    assignment — bypasses `nn.Module.to()` (which calls `_apply` → `swap`,
+    which fails on optimum.quanto's QLinear).
+
+    The non-obvious correctness point: after `quanto.quantize(model)`, a
+    QLinear's `weight` is REPLACED with a non-`nn.Parameter` custom tensor
+    type. `module.parameters()` skips it entirely — iterating params alone
+    misses the bulk of an int8 model's storage (the 0.32 GB symptom on a
+    22 GB base = parameters() found only the LoRA + norm + embedding params).
+    Combine standard iteration with the explicit quanto attrs musubi uses.
+
+    Without this, block-swap looks attached but `memory_allocated()` doesn't
+    drop. With it, the int8 weight tensors actually move."""
+    non_blocking = device.type != "cpu"
+    target = torch.device(device)
+    with torch.no_grad():
+        # Standard path: regular Parameters + Buffers (norms, embeddings, biases).
+        for p in module.parameters():
+            p.data = p.data.to(device, non_blocking=non_blocking)
+        for b in module.buffers():
+            b.data = b.data.to(device, non_blocking=non_blocking)
+        # Quanto path: explicit Linear-like attrs, catches the QLinear weight
+        # that's NOT a registered Parameter post-quantization.
+        for sub in module.modules():
+            if not sub.__class__.__name__.endswith("Linear"):
+                continue
+            for attr in _LINEAR_QUANT_ATTRS:
+                t = getattr(sub, attr, None)
+                if t is None or not hasattr(t, "data") or not hasattr(t.data, "to"):
+                    continue
+                if t.data.device == target:
+                    continue
+                t.data = t.data.to(device, non_blocking=non_blocking)
 
 
 def _normalize_device(device: torch.device) -> torch.device:
