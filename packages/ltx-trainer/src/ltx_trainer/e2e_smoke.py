@@ -72,22 +72,36 @@ def gate_checkpoint(output_dir: Path) -> Path:
     return ckpts[-1]
 
 
-def make_smoke_train_config(base_config: dict, preprocessed_root: str, output_dir: str, steps: int) -> dict:
-    """Override a REAL base config for the smoke: point it at the smoke dataset,
-    cap steps, set the output dir, and ensure the audio strategy is on. Pure — we
-    override a known-good config rather than synthesize the schema from scratch."""
+def make_smoke_train_config(
+    base_config: dict,
+    preprocessed_root: str,
+    output_dir: str,
+    steps: int,
+    model_path: str | None = None,
+    text_encoder_path: str | None = None,
+) -> dict:
+    """Override a REAL base config for the smoke: point it at the smoke dataset +
+    the model/Gemma, cap steps, set the output dir, and FORCE the audio-guided v2v
+    strategy. Pure — we override a known-good config rather than synthesize the
+    schema from scratch (the base may be a text_to_video config)."""
     cfg = dict(base_config)
-    cfg.setdefault("data", {})
+    if model_path or text_encoder_path:
+        m = {**cfg.get("model", {})}
+        if model_path:
+            m["model_path"] = model_path
+        if text_encoder_path:
+            m["text_encoder_path"] = text_encoder_path
+        cfg["model"] = m
     cfg["data"] = {**cfg.get("data", {}), "preprocessed_data_root": preprocessed_root}
     cfg["training"] = {**cfg.get("training", {}), "steps": int(steps)}
     cfg["output_dir"] = output_dir
     ts = {**cfg.get("training_strategy", {})}
-    ts.setdefault("name", "video_to_video")
+    ts["name"] = "video_to_video"  # FORCE — base may be text_to_video; we want audio-guided v2v
     ts["with_audio"] = True
     ts.setdefault("audio_mode", "condition")
     cfg["training_strategy"] = ts
-    # cap checkpoint cadence so a few-step smoke actually writes one
-    cfg["checkpoints"] = {**cfg.get("checkpoints", {}), "interval": min(int(steps), cfg.get("checkpoints", {}).get("interval", steps))}
+    # write a checkpoint within the short smoke (base interval may be large or null)
+    cfg["checkpoints"] = {**cfg.get("checkpoints", {}), "interval": int(steps)}
     return cfg
 
 
@@ -198,7 +212,8 @@ def run_smoke(
         return
     out_dir = workdir / "smoke_out"
     smoke_cfg = make_smoke_train_config(
-        yaml.safe_load(Path(base_config).read_text()), str(precomputed), str(out_dir), steps)
+        yaml.safe_load(Path(base_config).read_text()), str(precomputed), str(out_dir), steps,
+        model_path=model_path, text_encoder_path=text_encoder_path)
     cfg_path = workdir / "smoke_config.yaml"
     cfg_path.write_text(yaml.safe_dump(smoke_cfg))
     _run([py, str(scripts / "train.py"), str(cfg_path)], "TRAIN")
