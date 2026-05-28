@@ -1,6 +1,6 @@
 # LTX-2 fork — Claude instructions
 
-Last updated: 2026-05-27
+Last updated: 2026-05-28
 
 **This is a fork of Lightricks's LTX-2 trainer**, branch `audio-guidance-iclora-vtv`. Used by the parent `ComfyUI-AudioLoopHelper` repo (`../../`) for audio→video IC-LoRA training research. Parent project's CLAUDE.md (`../../CLAUDE.md`) covers the broader ComfyUI work; this file covers what's specific to working IN this fork.
 
@@ -72,6 +72,17 @@ For the 4090 training config: set `acceleration.block_swap_blocks: 36`, `acceler
 ## Sister-repo coordination
 
 This fork tracks musubi-tuner's LTX-2 work as prior art (cloned at `../musubi-tuner/`, branch `ltx-2`). Their `av_ic` strategy + the offload helpers in `coderef/musubi-tuner/src/musubi_tuner/ltx_2/model/ltx2_custom_offloading_utils.py` are direct references. The catalog of which musubi techniques apply to our work lives at `../../internal/audio_iclora_prior_art.md` (private clone only).
+
+### Cross-repo memo channel with audio-loop-lab (established 2026-05-28)
+
+Bilateral async channel between this Claude (LTX-2 fork side) and audio-loop-lab claude (the parent ComfyUI-AudioLoopHelper project that consumes LTX-2 trainer outputs). Mirrors the sage-fork channel pattern.
+
+- **Inbound** (audio-loop-lab → us): `internal/AUDIO_LOOP_CLAUDE_TO_LTX2_CLAUDE_MEMO.md`. SessionStart hook at `.claude/hooks/check_memo_inbox.sh` notifies us when it's newer than `internal/.memo_inbox_seen_at`.
+- **Outbound** (us → audio-loop-lab): `coderef/audio-loop-lab/internal/LTX2_CLAUDE_TO_AUDIO_LOOP_CLAUDE_MEMO.md` (via the reverse symlink at `coderef/audio-loop-lab` → the parent ComfyUI-AudioLoopHelper repo).
+- **Skill**: `.claude/skills/cross-repo-handoff/SKILL.md` — trigger phrases like "send memo to audio-loop-lab", "check audio-loop memo", "respond to audio-loop-lab".
+- **Send helper**: `internal/scripts/send_memo_to_audio_loop_lab.sh` — bumps outbound mtime after a memo edit.
+
+`.claude/`, `internal/`, and `coderef/` are all gitignored on this fork (they depend on the reverse symlink + local-machine paths other clones don't have).
 
 ## Pointers
 

@@ -47,3 +47,9 @@ tmp
 
 # Binary files
 *.so
+
+# Cross-repo memo channel + Claude harness (depend on a reverse symlink
+# other clones don't have; gitignore so each clone configures locally).
+.claude/
+internal/
+coderef/
