@@ -1,0 +1,146 @@
+# =============================================================================
+# LTX-2 Audio-Reference IC-LoRA Training Configuration
+# =============================================================================
+#
+# Goal: an AUDIO-only IC-LoRA where an in-context reference AUDIO clip steers an
+# attribute of the generated audio+video. The reference is the CONTROLLER
+# (transfer paradigm): content varies, the attribute is read from the reference,
+# the caption is neutral. First proof = a voiced TONE reference carrying pitch ->
+# generated speech F0 tracks the tone (base-absent, so a clean YES/NO).
+#
+# WHY THIS SHAPE (the seesaw — read before changing the pairing/targets):
+#   "matched content" and "audio controls the attribute" are mutually exclusive.
+#   If reference and target share content, the per-example attribute must ride the
+#   caption -> TEXT controls it. For the audio to be load-bearing, reference and
+#   target must DIFFER in content and SHARE the attribute, with the reference as
+#   the sole carrier. That is this strategy.
+#
+# Dataset structure (audio claude's pitch-gate gen + the trainer precompute):
+#   preprocessed_data_root/
+#   ├── latents/                  # Target video latents (generated; the AV target)
+#   ├── conditions/               # Text embeddings (constant, pitch-free caption)
+#   ├── audio_latents/            # Target audio latents (speech pitch-shifted to P)
+#   └── reference_audio_latents/  # Reference audio latents (voiced tone @ P)
+#       (produced by scripts/precompute_reference_audio.py; same .pt format as
+#        audio_latents, paired by matching relative path)
+#
+# The reference-audio tokens are appended CLEAN at negative RoPE positions
+# matching the inference convention (ltx_pipelines.lipdub); loss is on the target
+# audio + the generated video, reference excluded.
+#
+# Validation is DISABLED here: the in-trainer sampler has no audio-reference
+# inference path yet, so the first run is train + checkpoint only. The gate is the
+# standalone audio-swap eval (feed a held-out tone -> measured output F0 tracks it,
+# vs a no-LoRA baseline), run offline on the checkpoint.
+# =============================================================================
+
+model:
+  # .safetensors checkpoint (LTX-2.3 22B distilled). Local path only.
+  model_path: "/path/to/ltx-2.3-22b-distilled.safetensors"
+  # Gemma text-encoder directory. Local path only.
+  text_encoder_path: "/path/to/gemma-text-encoder"
+  training_mode: "lora"
+  load_checkpoint: null
+
+lora:
+  rank: 32
+  alpha: 32
+  dropout: 0.0
+  # AUDIO-STACK ONLY. The reference->target mixing happens in the audio
+  # SELF-attention (audio_attn1) over the [target | reference] audio sequence —
+  # that is the load-bearing module. audio_attn2 (text cross-attn) + audio_ff
+  # round out the audio stack. No cross-modal bridges: pitch transfer is
+  # audio->audio; we do not need audio<->video coupling for this gate.
+  target_modules:
+    - "audio_attn1.to_k"
+    - "audio_attn1.to_q"
+    - "audio_attn1.to_v"
+    - "audio_attn1.to_out.0"
+    - "audio_attn2.to_k"
+    - "audio_attn2.to_q"
+    - "audio_attn2.to_v"
+    - "audio_attn2.to_out.0"
+    - "audio_ff.net.0.proj"
+    - "audio_ff.net.2"
+
+training_strategy:
+  name: "audio_reference"
+  # Drop the init frame for the proof: the reference audio is then the ONLY
+  # non-caption input, so it is unambiguously the sole carrier of the attribute.
+  first_frame_conditioning_p: 0.0
+  audio_latents_dir: "audio_latents"
+  reference_audio_latents_dir: "reference_audio_latents"
+  # 1.0 keeps the reference audio fully clean (it is context, not a target).
+  reference_strength: 1.0
+
+optimization:
+  learning_rate: 2e-4
+  steps: 2000
+  batch_size: 1
+  gradient_accumulation_steps: 1
+  max_grad_norm: 1.0
+  optimizer_type: "adamw8bit"
+  scheduler_type: "linear"
+  scheduler_params: { }
+  enable_gradient_checkpointing: true
+
+acceleration:
+  mixed_precision_mode: "bf16"
+  quantization: "int8-quanto"
+  load_text_encoder_in_8bit: true
+  # The run+fit smoke measured an 8.70 GB training peak at 36/48 swap — huge
+  # headroom (startup ~17.8 GB is the tight point). 24/48 keeps resident well
+  # under that while cutting the per-step PCIe cost vs 36 (the 14 s/step at 36
+  # was swap-bound). Lower toward ~16 for more speed if VRAM allows.
+  block_swap_blocks: 24
+  offload_optimizer_during_validation: false
+
+data:
+  # The trainer precompute output dir (latents/ + conditions/ + audio_latents/ +
+  # reference_audio_latents/).
+  preprocessed_data_root: "/path/to/pitch_ref_gate_v1/precomputed"
+  num_dataloader_workers: 2
+
+validation:
+  # DISABLED (interval: null + skip_initial_validation): no audio-reference
+  # in-trainer inference path yet. The real gate is the offline audio-swap eval.
+  prompts:
+    - "A person speaking to the camera."
+  reference_videos: null
+  images: null
+  negative_prompt: "worst quality"
+  video_dims: [ 256, 256, 121 ]
+  frame_rate: 25.0
+  seed: 42
+  inference_steps: 30
+  interval: null
+  guidance_scale: 4.0
+  stg_scale: 1.0
+  stg_blocks: [28]
+  stg_mode: "stg_v"
+  generate_audio: false
+  skip_initial_validation: true
+  include_reference_in_output: false
+
+checkpoints:
+  interval: 500
+  keep_last_n: 3
+  precision: "bfloat16"
+
+flow_matching:
+  timestep_sampling_mode: "shifted_logit_normal"
+  timestep_sampling_params: { }
+
+hub:
+  push_to_hub: false
+  hub_model_id: null
+
+wandb:
+  enabled: false
+  project: "ltx-2-trainer"
+  entity: null
+  tags: [ "ltx2", "ic-lora", "audio-reference" ]
+  log_validation_videos: false
+
+seed: 42
+output_dir: "outputs/ltx2_audio_reference"

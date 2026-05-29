@@ -3,6 +3,7 @@ configs/*.yaml
 !configs/ltx2_av_lora_low_vram.yaml
 !configs/ltx2_v2v_ic_lora.yaml
 !configs/ltx2_audio_coupling_ic_lora.yaml
+!configs/ltx2_audio_reference.yaml
 datasets
 outputs
 wandb
