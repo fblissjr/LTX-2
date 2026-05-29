@@ -6,6 +6,15 @@
 [![Paper](https://img.shields.io/badge/Paper-PDF-EC1C24?logo=adobeacrobatreader&logoColor=white)](https://arxiv.org/abs/2601.03233)
 [![Discord](https://img.shields.io/badge/Join-Discord-5865F2?logo=discord)](https://discord.gg/ltxplatform)
 
+> **Note — this is a fork.** It tracks Lightricks' LTX-2 but adds trainer changes
+> for an experiment: training a small **audio-conditioned IC-LoRA** on the 22B
+> distilled model on a single 24 GB GPU (via block-swap). That work — what was
+> built, how it works, what we observed, what we'd change — is written up in
+> [`docs/audio_iclora_trainer_notes.md`](docs/audio_iclora_trainer_notes.md). It's
+> experimental and does **not** yet demonstrate a working audio coupling; it's a
+> reproducible *process* to fork. A companion ComfyUI custom-node repo holds the
+> data / eval / inference half. Everything below is upstream LTX-2.
+
 **LTX-2** is the first DiT-based audio-video foundation model that contains all core capabilities of modern video generation in one model: synchronized audio and video, high fidelity, multiple performance modes, production-ready outputs, API access, and open access.
 
 <div align="center">
@@ -121,3 +130,7 @@ Each package includes comprehensive documentation:
 * **[LTX-Core README](packages/ltx-core/README.md)** - Core model implementation, inference stack, and utilities
 * **[LTX-Pipelines README](packages/ltx-pipelines/README.md)** - High-level pipeline implementations and usage guides
 * **[LTX-Trainer README](packages/ltx-trainer/README.md)** - Training and fine-tuning documentation with detailed guides
+
+### Fork-specific docs
+
+* **[Audio IC-LoRA trainer notes](docs/audio_iclora_trainer_notes.md)** - the audio-conditioned IC-LoRA experiment added in this fork (block-swap 22B-on-24GB, condition-mode strategy, synthetic data builders). Experimental; pairs with the companion ComfyUI repo's data/eval half.

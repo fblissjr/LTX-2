@@ -1,6 +1,6 @@
 # LTX-2 fork — Claude instructions
 
-Last updated: 2026-05-28
+Last updated: 2026-05-29
 
 **This is a fork of Lightricks's LTX-2 trainer**, branch `audio-guidance-iclora-vtv`. Used by the parent `ComfyUI-AudioLoopHelper` repo (`../../`) for audio→video IC-LoRA training research. Parent project's CLAUDE.md (`../../CLAUDE.md`) covers the broader ComfyUI work; this file covers what's specific to working IN this fork.
 
@@ -88,4 +88,4 @@ Bilateral async channel between this Claude (LTX-2 fork side) and audio-loop-lab
 
 - Parent project rules: `../../CLAUDE.md`
 - Trainer plan + design history: `../../internal/audio_iclora_status.md`, `../../internal/audio_iclora_roadmap.md`, `../../internal/block_swap_port_plan.md` (all private clone)
-- Public docs: `packages/ltx-trainer/docs/`
+- Public fork docs: `docs/audio_iclora_trainer_notes.md` (the audio-IC-LoRA experiment write-up; linked from this fork's README + the companion repo's `docs/audio_iclora/index.md`). Per-package docs: each package's own `README.md`.
