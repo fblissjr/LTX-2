@@ -5,9 +5,9 @@ Last updated: 2026-05-29
 Experimental notes on the trainer changes in this LTX-2 fork that support training a
 small audio-conditioned IC-LoRA on the 22B distilled model **on a single 24 GB
 consumer GPU**. This is the training half of a two-repo effort; the data design,
-ComfyUI inference, and eval live in the companion repo (a ComfyUI custom-node pack —
-its `docs/experimental/audio_iclora_method_notes.md` is the top-level writeup and is
-honest about what does and doesn't work).
+ComfyUI inference, and eval live in the companion repo (a ComfyUI custom-node pack).
+Its `docs/audio_iclora/index.md` is the experiment hub and `docs/audio_iclora/method_notes.md`
+is the top-level writeup — both honest about what does and doesn't work.
 
 Voice here matches that writeup: observed facts or explicit guesses, no hype. We
 have **not** demonstrated a working audio IC-LoRA. This doc describes the machinery
