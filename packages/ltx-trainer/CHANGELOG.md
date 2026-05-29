@@ -8,6 +8,20 @@ uses semantic versioning.
 
 ### Added
 
+- `audio_reference` training strategy — an **audio-only IC-LoRA** (transfer paradigm):
+  an in-context reference *audio* clip steers an attribute of the jointly-generated
+  audio+video. The audio stream is `[target (noised) | reference (clean)]` with the
+  reference at negative RoPE positions matching the inference convention
+  (`ltx_pipelines.lipdub`); loss is on the target audio + the generated video, the
+  reference excluded. Example config `configs/ltx2_audio_reference.yaml`.
+  **The first learning run was trained on this strategy** against the distilled
+  LTX-2.3 22B with a pitch-reference dataset (a voiced reference tone → the generated
+  audio adopts that pitch); the F0-tracking eval runs through ComfyUI. Real-22B
+  run+fit verified (int8-quanto + block-swap fits a 24 GB card).
+- `scripts/precompute_reference_audio.py` + `reference_audio.py`: build the
+  `reference_audio_latents` channel by encoding reference WAVs through the audio VAE,
+  in the same `[C, T, F]` format as `audio_latents` and paired to each clip by
+  relative path so `PrecomputedDataset` joins them.
 - Audio-coupling IC-LoRA training config (`configs/ltx2_audio_coupling_ic_lora.yaml`):
   a `video_to_video` condition-mode recipe whose LoRA targets only the audio
   self/cross attention, audio feed-forward, and the audio→video cross-modal
@@ -29,6 +43,13 @@ uses semantic versioning.
 
 ### Fixed
 
+- Mono audio now encodes through the audio VAE: the VAE expects a 2-channel (stereo)
+  mel, so mono speech/tones previously crashed the audio precompute. `ensure_audio_channels`
+  dual-mono-widens (and mean-downmixes) to the encoder's input channel count, applied in
+  both the target-audio (`process_videos`) and reference-audio encodes.
+- The reference-audio precompute loads the audio VAE in float32 and moves the mel
+  processor on-device, matching `process_videos`, so the reference and target audio
+  latents come from an identical encoder (no precision/device divergence).
 - The end-to-end smoke now generates paired references (reference ≠ target) via
   the paired-reference generator instead of reusing each clip as its own
   reference, so the integration gate exercises the real reference-encoding path

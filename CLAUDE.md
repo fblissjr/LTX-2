@@ -49,6 +49,8 @@ The `audio_reference` strategy is the **transfer** paradigm: the in-context refe
 
 **Inference/eval lives in ComfyUI, not the trainer.** Eval generation runs through ComfyUI nodes (the AUDIO twin of `LTXAddVideoICLoRAGuide` / `…Advanced`), reusing ltx-core `AudioConditionByReferenceLatent` + the lipdub patchify — there is no audio-reference inference path in `inference.py`/the validation sampler. So train configs for this strategy keep validation disabled; the gate is the offline audio-swap F0-tracking eval.
 
+**First learning run (2026-05-30):** trained `audio_reference` on the **distilled** 22B at commit `05f4e2e`, recipe `configs/ltx2_audio_reference.yaml` (the actual run used a gitignored real-path copy `_run_audio_ref.yaml`), on the 291-pair pitch-reference dataset (a voiced reference tone → the generated audio adopts that pitch). int8-quanto + block-swap 24, 2000 steps, validation off → checkpoint. The F0-tracking eval is audio claude's (ComfyUI, stock `LTXVAudioVAEEncode` + `LTXVSetAudioRefTokens`) — confirm the eval's audio VAE runs **fp32** to match the training encode.
+
 ## Commands
 
 ```bash
