@@ -13,15 +13,18 @@ from ltx_trainer.training_strategies.base_strategy import (
     TrainingStrategy,
     TrainingStrategyConfigBase,
 )
+from ltx_trainer.training_strategies.audio_reference import AudioReferenceConfig, AudioReferenceStrategy
 from ltx_trainer.training_strategies.text_to_video import TextToVideoConfig, TextToVideoStrategy
 from ltx_trainer.training_strategies.video_to_video import VideoToVideoConfig, VideoToVideoStrategy
 
 # Type alias for all strategy config types
-TrainingStrategyConfig = TextToVideoConfig | VideoToVideoConfig
+TrainingStrategyConfig = TextToVideoConfig | VideoToVideoConfig | AudioReferenceConfig
 
 __all__ = [
     "DEFAULT_FPS",
     "VIDEO_SCALE_FACTORS",
+    "AudioReferenceConfig",
+    "AudioReferenceStrategy",
     "ModelInputs",
     "TextToVideoConfig",
     "TextToVideoStrategy",
@@ -50,9 +53,11 @@ def get_training_strategy(config: TrainingStrategyConfig) -> TrainingStrategy:
             strategy = TextToVideoStrategy(config)
         case VideoToVideoConfig():
             strategy = VideoToVideoStrategy(config)
+        case AudioReferenceConfig():
+            strategy = AudioReferenceStrategy(config)
         case _:
             raise ValueError(f"Unknown training strategy config type: {type(config).__name__}")
 
-    audio_mode = "(audio enabled 🔈)" if getattr(config, "with_audio", False) else "(audio disabled 🔇)"
+    audio_mode = "(audio enabled 🔈)" if strategy.requires_audio else "(audio disabled 🔇)"
     logger.debug(f"🎯 Using {strategy.__class__.__name__} training strategy {audio_mode}")
     return strategy
