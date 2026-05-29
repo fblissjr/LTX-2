@@ -196,12 +196,18 @@ class AudioReferenceStrategy(TrainingStrategy):
         target_audio_positions = self._get_audio_positions(
             num_time_steps=target_audio_len, batch_size=batch_size, device=device, dtype=dtype
         )
-        # Reference at distinct, strictly-negative positions so the model reads it
-        # as out-of-timeline context (not part of the target's [0, T) span).
+        # Reference at distinct, strictly-negative positions so the model reads it as
+        # out-of-timeline context. This MUST match the inference convention exactly
+        # (ltx_pipelines.lipdub.patchify_lipdub_audio_reference_latent with
+        # negative_positions=True): shift by the reference's own end-bound plus a small
+        # 0.04 gap, so the reference ends just below the target timeline's 0. RoPE is
+        # absolute — a different train-time offset would give the LoRA a reference<->target
+        # geometry it never sees at generation time.
         ref_audio_positions = self._get_audio_positions(
             num_time_steps=ref_audio_len, batch_size=batch_size, device=device, dtype=dtype
         )
-        ref_audio_positions = ref_audio_positions - (ref_audio_positions.max() + 1.0)
+        aud_dur = ref_audio_positions[:, :, -1, 1].max()
+        ref_audio_positions = ref_audio_positions - aud_dur - 0.04
         audio_positions = torch.cat([target_audio_positions, ref_audio_positions], dim=2)
 
         audio_modality = Modality(
@@ -231,7 +237,14 @@ class AudioReferenceStrategy(TrainingStrategy):
         inputs: ModelInputs,
     ) -> Tensor:
         """Video target loss + masked target-audio loss. Reference audio is excluded
-        by ``audio_loss_mask`` (False on the trailing reference tokens). Returns [B,]."""
+        by ``audio_loss_mask`` (False on the trailing reference tokens). Returns [B,].
+
+        Video stays in the loss even when ``target_modules`` are audio-only: the
+        seemingly-wasted video term is not a real cost, because the video stream's
+        forward+backward is already required for the *audio* gradient (audio_pred
+        depends on video activations via video->audio cross-attention). The only true
+        cost lever would be dropping video entirely (audio-only output), which trades
+        away the AV product shape — a deliberate fallback, not the default."""
         video_loss = self._masked_velocity_loss(video_pred, inputs.video_targets, inputs.video_loss_mask)
 
         if audio_pred is None or inputs.audio_targets is None or inputs.audio_loss_mask is None:

@@ -82,15 +82,21 @@ def test_audio_targets_full_length_zero_on_reference():
     assert torch.allclose(out.audio_targets[:, 20:, :], torch.zeros_like(out.audio_targets[:, 20:, :]))
 
 
-def test_reference_positions_distinct_from_target():
-    """Reference audio tokens occupy a distinct (negative) position range so the
-    model reads them as context, not as part of the target timeline [0, T)."""
+def test_reference_positions_match_inference_negative_convention():
+    """Reference audio tokens sit at strictly-negative positions ending JUST below the
+    target timeline's 0 — the exact convention inference uses
+    (ltx_pipelines.lipdub.patchify_lipdub_audio_reference_latent: shift by the reference
+    end-bound + 0.04). Train/inference must agree on this offset, else the LoRA sees a
+    different reference<->target geometry at generation time. The small-gap assertion
+    guards against an arbitrary large offset (e.g. the old -(max+1.0))."""
     strat = _strategy(first_frame_conditioning_p=0.0)
     out = strat.prepare_training_inputs(make_batch(audio_t=20, ref_audio_t=12), FixedSigmaSampler())
     positions = out.audio.positions  # [B, 1, T_tgt + T_ref, 2]
     assert positions.shape[2] == 20 + 12
     ref_time = positions[:, 0, 20:, :]
-    assert (ref_time < 0).all()
+    assert (ref_time < 0).all()  # entirely out of the target timeline
+    # Ends just below 0 (the 0.04 gap), not an arbitrary large offset.
+    assert -0.5 < ref_time.max().item() < 0
 
 
 # --- the AV target: video is generated, in the loss ---------------------------
