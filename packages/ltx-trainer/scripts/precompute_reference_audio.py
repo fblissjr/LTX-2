@@ -45,7 +45,7 @@ def main() -> None:
     ap.add_argument("--data-root", required=True, type=Path, help="Root the manifest paths are relative to")
     ap.add_argument("--output-dir", required=True, type=Path, help="Destination reference_audio_latents/ directory")
     ap.add_argument("--video-key", default="video", help="Manifest field with the clip (video) path")
-    ap.add_argument("--reference-key", default="reference_audio", help="Manifest field with the reference WAV path")
+    ap.add_argument("--reference-key", default="reference", help="Manifest field with the reference WAV path")
     ap.add_argument("--device", default="cuda", help="Device for the audio VAE encoder")
     ap.add_argument("--overwrite", action="store_true", help="Re-encode even if the output .pt already exists")
     args = ap.parse_args()
@@ -71,17 +71,10 @@ def main() -> None:
 
         with torch.inference_mode():
             out = encode_reference_waveform(encoder, processor, waveform, sample_rate)
+        out["latents"] = out["latents"].cpu().contiguous()
 
         dst.parent.mkdir(parents=True, exist_ok=True)
-        torch.save(
-            {
-                "latents": out["latents"].cpu().contiguous(),
-                "num_time_steps": out["num_time_steps"],
-                "frequency_bins": out["frequency_bins"],
-                "duration": out["duration"],
-            },
-            dst,
-        )
+        torch.save(out, dst)
         n_done += 1
 
     logger.info(f"Done: wrote {n_done} reference latents ({len(rows) - n_done} skipped/existing) to {args.output_dir}")

@@ -1,6 +1,6 @@
 # LTX-2 fork — Claude instructions
 
-Last updated: 2026-05-29
+Last updated: 2026-05-30
 
 **This is a fork of Lightricks's LTX-2 trainer**, branch `audio-guidance-iclora-vtv`. Used by the parent `ComfyUI-AudioLoopHelper` repo (`../../`) for audio→video IC-LoRA training research. Parent project's CLAUDE.md (`../../CLAUDE.md`) covers the broader ComfyUI work; this file covers what's specific to working IN this fork.
 
@@ -9,6 +9,7 @@ Last updated: 2026-05-29
 - `packages/ltx-core/` — Lightricks's transformer + VAE + tokenizers (upstream-tracking).
 - `packages/ltx-trainer/` — the trainer (where our work lives). Audio-IC-LoRA + block-swap port + data validation + e2e smoke all here.
 - `packages/ltx-trainer/src/ltx_trainer/training_strategies/video_to_video.py` — the `condition` / `generate` / `continuation` audio modes we added.
+- `packages/ltx-trainer/src/ltx_trainer/training_strategies/audio_reference.py` — the **audio-only IC-LoRA** strategy: an in-context reference AUDIO steers a generated-audio attribute; AV target; audio stream `[target | reference-clean]`. Its `reference_audio_latents` channel is built by `reference_audio.py` + `scripts/precompute_reference_audio.py`; example config `configs/ltx2_audio_reference.yaml`.
 - `packages/ltx-trainer/src/ltx_trainer/block_swap.py` — the 4090-fit machinery. **READ THE MODULE DOCSTRING FIRST** — it documents the optimum.quanto Parameter-setter trap that wastes hours if you re-derive it.
 - `packages/ltx-trainer/tests/` — unit tests for the strategy, codec load, block-swap.
 
@@ -37,6 +38,16 @@ Audio VAE decoder + vocoder are loaded only when **validation will actually gene
 ### Block-swap ordering
 
 `attach_block_swap` MUST run AFTER `accelerator.prepare()` — prepare recursively moves the model to the compute device, undoing any prior offload. The trainer wires it this way; if a future refactor moves the call, the swap silently no-ops.
+
+### Audio-reference IC-LoRA — the seesaw + train/inference parity (2026-05-30)
+
+The `audio_reference` strategy is the **transfer** paradigm: the in-context reference AUDIO is the *controller*, so the pairing is **different content, shared attribute, reference carries it, caption neutral**. The seesaw (don't re-litigate toward matched content): *matched content ⟺ the caption controls the attribute*; *the audio controls the attribute ⟺ unmatched content* — mutually exclusive. Matched-content is the OTHER (fixed-effect / cowboy-hat) paradigm where text is the controller.
+
+**Train/inference RoPE parity is load-bearing.** The reference is appended `[target | ref]` at NEGATIVE positions matching `ltx_pipelines.lipdub.patchify_lipdub_audio_reference_latent(negative_positions=True)` — shift by the reference's own end-bound + a `0.04` gap so it ends just below the target's 0. A different train-time offset silently degrades generation; locked by a test assertion.
+
+**Feasibility + fit proven (2026-05-29):** forward+backward on the real 22B (int8 + block-swap + grad-ckpt) gives a finite loss with `∂loss/∂reference ≠ 0` (the reference is load-bearing — the trainer twin of "remove reference → output stops tracking") at **8.70 GB peak**. `block_swap_blocks=36` is overkill here; startup (~17.8 GB, full int8 model pre-swap) is the tight point, so the config uses 24 and can go ~16.
+
+**Inference/eval lives in ComfyUI, not the trainer.** Eval generation runs through ComfyUI nodes (the AUDIO twin of `LTXAddVideoICLoRAGuide` / `…Advanced`), reusing ltx-core `AudioConditionByReferenceLatent` + the lipdub patchify — there is no audio-reference inference path in `inference.py`/the validation sampler. So train configs for this strategy keep validation disabled; the gate is the offline audio-swap F0-tracking eval.
 
 ## Commands
 
