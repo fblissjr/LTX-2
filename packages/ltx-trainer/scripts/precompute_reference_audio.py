@@ -51,8 +51,11 @@ def main() -> None:
     args = ap.parse_args()
 
     device = torch.device(args.device)
-    encoder = load_audio_vae_encoder(args.model_path, device=device, dtype=torch.bfloat16)
-    processor = build_audio_processor(encoder)
+    # Mirror scripts/process_videos.py's audio setup so reference latents come from an
+    # IDENTICAL encoder to the target audio_latents: audio VAE in float32 (quality), and
+    # the processor moved on-device (its STFT window must share the waveform's device).
+    encoder = load_audio_vae_encoder(args.model_path, device=device, dtype=torch.float32)
+    processor = build_audio_processor(encoder).to(device)
 
     rows = _read_manifest(args.manifest)
     args.output_dir.mkdir(parents=True, exist_ok=True)
