@@ -50,6 +50,32 @@ def build_audio_processor(encoder: torch.nn.Module):
     )
 
 
+def ensure_audio_channels(waveform: torch.Tensor, want: int) -> torch.Tensor:
+    """Match the waveform's channel count to what the audio VAE expects.
+
+    The LTX audio VAE encodes a 2-channel (stereo) mel — its first conv has
+    ``in_channels=2``. Mono speech/tones therefore must be widened to that many
+    channels: duplicating mono into N identical channels ("dual-mono") is the
+    correct way to feed mono content into a stereo-trained VAE (the decoder just
+    yields identical L/R). ``>want`` channels are downmixed by averaging.
+
+    Args:
+        waveform: ``[..., channels, samples]`` (channels at dim -2).
+        want: target channel count (e.g. ``encoder.in_channels``).
+    """
+    ch = waveform.shape[-2]
+    if ch == want:
+        return waveform
+    if ch > want:
+        waveform = waveform.mean(dim=-2, keepdim=True)
+        ch = 1
+    if ch == 1:
+        return waveform.repeat_interleave(want, dim=-2)
+    # 1 < ch < want: tile up then trim to exactly ``want``.
+    reps = (want + ch - 1) // ch
+    return waveform.repeat_interleave(reps, dim=-2)[..., :want, :]
+
+
 def encode_reference_waveform(
     encoder: torch.nn.Module,
     processor: Any,
@@ -72,6 +98,8 @@ def encode_reference_waveform(
     waveform = waveform.to(device=param.device, dtype=param.dtype)
     if waveform.dim() == 2:
         waveform = waveform.unsqueeze(0)  # [C, samples] -> [1, C, samples]
+    # LTX audio VAE wants a 2-channel mel; widen mono refs to match (dual-mono).
+    waveform = ensure_audio_channels(waveform, getattr(encoder, "in_channels", 2))
 
     duration = waveform.shape[-1] / sampling_rate
     mel = processor.waveform_to_mel(Audio(waveform=waveform, sampling_rate=sampling_rate)).to(dtype=param.dtype)

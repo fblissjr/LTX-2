@@ -12,7 +12,11 @@ from pathlib import Path
 
 import torch
 
-from ltx_trainer.reference_audio import encode_reference_waveform, reference_output_path
+from ltx_trainer.reference_audio import (
+    encode_reference_waveform,
+    ensure_audio_channels,
+    reference_output_path,
+)
 
 
 def test_reference_output_path_mirrors_video_latent_rel():
@@ -43,6 +47,27 @@ class _StubEncoder(torch.nn.Module):
 
     def forward(self, mel):  # noqa: ARG002
         return torch.zeros(1, 8, self.t, 16)
+
+
+def test_ensure_audio_channels_mono_to_stereo_is_dual_mono():
+    mono = torch.randn(1, 1, 100)  # [batch, channels=1, samples]
+    out = ensure_audio_channels(mono, 2)
+    assert out.shape == (1, 2, 100)
+    assert torch.equal(out[:, 0], out[:, 1])  # dual-mono: identical L/R
+
+
+def test_ensure_audio_channels_noop_when_already_matching():
+    stereo = torch.randn(1, 2, 100)
+    out = ensure_audio_channels(stereo, 2)
+    assert out.shape == (1, 2, 100)
+    assert torch.equal(out, stereo)
+
+
+def test_ensure_audio_channels_downmixes_when_too_many():
+    quad = torch.randn(1, 4, 100)
+    out = ensure_audio_channels(quad, 2)
+    assert out.shape == (1, 2, 100)
+    assert torch.equal(out[:, 0], out[:, 1])  # mean-downmix, then duplicated
 
 
 def test_encode_reference_waveform_format_matches_audio_latents():

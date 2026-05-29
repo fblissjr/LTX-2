@@ -47,6 +47,7 @@ from ltx_core.model.audio_vae import AudioProcessor
 from ltx_core.types import Audio
 from ltx_trainer import logger
 from ltx_trainer.model_loader import load_audio_vae_encoder, load_video_vae_encoder
+from ltx_trainer.reference_audio import ensure_audio_channels
 from ltx_trainer.utils import open_image_as_srgb
 from ltx_trainer.video_utils import get_video_frame_count, read_video
 
@@ -867,6 +868,8 @@ def encode_audio(
     # Add batch dimension if needed: [channels, samples] -> [batch, channels, samples]
     if waveform.dim() == 2:
         waveform = waveform.unsqueeze(0)
+    # LTX audio VAE wants a 2-channel mel; widen mono audio to match (dual-mono).
+    waveform = ensure_audio_channels(waveform, getattr(audio_vae_encoder, "in_channels", 2))
 
     # Calculate duration
     duration = waveform.shape[-1] / audio.sampling_rate
