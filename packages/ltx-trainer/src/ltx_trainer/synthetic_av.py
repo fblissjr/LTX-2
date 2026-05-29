@@ -259,19 +259,16 @@ def generate_dataset_paired_refs(
     coupling with near-zero deltas (musubi-tuner `docs/ltx_2.md:1971`).
     """
     out_dir = Path(out_dir)
-    clips_dir = out_dir / "clips"
-    refs_dir = out_dir / "references"
-    clips_dir.mkdir(parents=True, exist_ok=True)
-    refs_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / "clips").mkdir(parents=True, exist_ok=True)
+    (out_dir / "references").mkdir(parents=True, exist_ok=True)
     rng = np.random.default_rng(seed)
-    shapes = ["circle", "square"]
     lo, hi = bpm_range
     if hi - lo <= min_bpm_gap:
         raise ValueError(f"bpm_range {bpm_range} too narrow for min_bpm_gap={min_bpm_gap}")
 
     captions, manifest = [], []
     for i in range(n):
-        shape = shapes[int(rng.integers(len(shapes)))]
+        shape = SHAPES[int(rng.integers(len(SHAPES)))]
         color = tuple(int(c) for c in rng.integers(120, 256, size=3))
         center = (float(rng.uniform(0.35, 0.65)), float(rng.uniform(0.35, 0.65)))
         target_bpm = float(rng.uniform(lo, hi))
@@ -281,14 +278,14 @@ def generate_dataset_paired_refs(
         ref_bpm = float(rng.uniform(lo, hi))
         while abs(ref_bpm - target_bpm) < min_bpm_gap:
             ref_bpm = float(rng.uniform(lo, hi))
-        def _spec(bpm: float) -> ClipSpec:
-            return ClipSpec(bpm=bpm, duration_s=duration_s, fps=fps,
-                            width=width, height=height,
-                            shape=shape, color=color, center=center)
-        target_spec = _spec(target_bpm)
-        ref_spec = _spec(ref_bpm)
-        t_frames, t_audio, sr, t_beats = generate_beat_pulse_clip(target_spec)
-        r_frames, r_audio, _, r_beats = generate_beat_pulse_clip(ref_spec)
+        # Same visual identity, different BPM — audio is the only signal
+        # distinguishing target from reference.
+        t_frames, t_audio, sr, t_beats = generate_beat_pulse_clip(
+            ClipSpec(bpm=target_bpm, duration_s=duration_s, fps=fps, width=width,
+                     height=height, shape=shape, color=color, center=center))
+        r_frames, r_audio, _, r_beats = generate_beat_pulse_clip(
+            ClipSpec(bpm=ref_bpm, duration_s=duration_s, fps=fps, width=width,
+                     height=height, shape=shape, color=color, center=center))
         t_rel = f"clips/clip_{i:04d}.mp4"
         r_rel = f"references/clip_{i:04d}.mp4"
         write_clip(t_frames, t_audio, sr, fps, out_dir / t_rel)
@@ -341,15 +338,13 @@ def generate_dataset_static_ref(
         color = tuple(int(c) for c in rng.integers(120, 256, size=3))
         center = (float(rng.uniform(0.35, 0.65)), float(rng.uniform(0.35, 0.65)))
         target_bpm = float(rng.uniform(lo, hi))
+        spec = ClipSpec(bpm=target_bpm, duration_s=duration_s, fps=fps,
+                        width=width, height=height, shape=shape, color=color, center=center)
 
-        def _spec(bpm: float) -> ClipSpec:
-            return ClipSpec(bpm=bpm, duration_s=duration_s, fps=fps,
-                            width=width, height=height,
-                            shape=shape, color=color, center=center)
-
-        t_frames, t_audio, sr, t_beats = generate_beat_pulse_clip(_spec(target_bpm))
-        # Reference: frozen identity, no pulse, silent. bpm is irrelevant (unused).
-        r_frames, r_audio, _, _ = generate_static_identity_clip(_spec(target_bpm))
+        t_frames, t_audio, sr, t_beats = generate_beat_pulse_clip(spec)
+        # Reference: frozen identity, no pulse, silent. Same spec — the static
+        # renderer ignores bpm/audio (the whole point: a frozen ref carries no rate).
+        r_frames, r_audio, _, _ = generate_static_identity_clip(spec)
         t_rel = f"clips/clip_{i:04d}.mp4"
         r_rel = f"references/clip_{i:04d}.mp4"
         write_clip(t_frames, t_audio, sr, fps, out_dir / t_rel)
