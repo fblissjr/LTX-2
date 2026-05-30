@@ -8,6 +8,14 @@ uses semantic versioning.
 
 ### Added
 
+- Training telemetry (`metrics.py`): an always-on `metrics.jsonl` curve written every
+  optimization step (loss, EMA loss, gradient norm, lr, step-time, per-sigma-bucket losses) —
+  durable and greppable even when the Rich progress bar is the only live display and stdout is
+  redirected (the gap that left an unattended run without a curve). Adds a `ConvergenceMonitor`
+  (under-fit / plateau / converged now; overfit + reference-decorative are accepted and wired
+  forward-compatibly, pending held-out-loss and reference-attribution-gap eval forwards) that
+  logs warnings during the run and an end-of-run verdict. The pre-clip gradient norm (previously
+  discarded) is now captured and surfaced on the progress bar (`|g|`), in the JSONL, and in W&B.
 - `audio_reference` training strategy — an **audio-only IC-LoRA** (transfer paradigm):
   an in-context reference *audio* clip steers an attribute of the jointly-generated
   audio+video. The audio stream is `[target (noised) | reference (clean)]` with the

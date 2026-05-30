@@ -39,6 +39,7 @@ from ltx_trainer.config_display import print_config
 from ltx_trainer.datasets import PrecomputedDataset
 from ltx_trainer.gpu_utils import free_gpu_memory, free_gpu_memory_context, get_gpu_memory_gb
 from ltx_trainer.hf_hub_utils import push_to_hub
+from ltx_trainer.metrics import EMA, ConvergenceMonitor, MetricsWriter, build_metrics_row
 from ltx_trainer.model_loader import load_embeddings_processor, load_text_encoder
 from ltx_trainer.model_loader import load_model as load_ltx_model
 from ltx_trainer.progress import TrainingProgress
@@ -89,6 +90,11 @@ def _offload_frozen_codecs(trainer) -> None:
             setattr(trainer, attr, m.to("cpu"))
 
 MEMORY_CHECK_INTERVAL = 200
+
+# Cadence (in optimization steps) for the periodic INFO metrics line + feeding the
+# convergence monitor. The per-step JSONL row is always written; this only gates the
+# coarser human-readable log line and the plateau/overfit/not-learning checks.
+METRICS_LOG_INTERVAL = 50
 
 
 class TrainingStats(BaseModel):
@@ -178,6 +184,14 @@ class LtxvTrainer:
         # Save the training configuration as YAML
         self._save_config()
 
+        # Always-on telemetry: a JSONL metrics curve (durable + greppable even when the Rich
+        # bar is the only live display and stdout is redirected — the gap that left the first
+        # run without a curve), an EMA of the noisy per-step loss, and a convergence monitor
+        # for underfit / plateau / overfit signals.
+        metrics_writer = MetricsWriter(Path(cfg.output_dir) / "metrics.jsonl") if IS_MAIN_PROCESS else None
+        loss_ema = EMA()
+        convergence_monitor = ConvergenceMonitor()
+
         remaining_steps = cfg.optimization.steps - initial_step
         if remaining_steps <= 0:
             raise ValueError(
@@ -231,11 +245,13 @@ class LtxvTrainer:
                     output = self._training_step(batch)
                     self._accelerator.backward(output.loss.mean())
 
+                    grad_norm: float | None = None
                     if self._accelerator.sync_gradients and cfg.optimization.max_grad_norm > 0:
-                        self._accelerator.clip_grad_norm_(
+                        clipped = self._accelerator.clip_grad_norm_(
                             self._trainable_params,
                             cfg.optimization.max_grad_norm,
                         )
+                        grad_norm = float(clipped) if clipped is not None else None
 
                     self._optimizer.step()
                     self._optimizer.zero_grad()
@@ -279,21 +295,57 @@ class LtxvTrainer:
                         loss=step_loss,
                         lr=current_lr,
                         step_time=step_time,
+                        grad_norm=grad_norm,
                         advance=is_optimization_step,
                     )
 
-                    # Log metrics to W&B (only on main process and optimization steps)
+                    # Metrics (main process, optimization steps): always-on JSONL curve +
+                    # W&B (if enabled) + periodic INFO line + convergence monitor.
                     if IS_MAIN_PROCESS and is_optimization_step:
                         # Track per-element loss by sigma bucket
                         self._sigma_tracker.update(output.sigma.cpu().tolist(), output.loss.detach().cpu().tolist())
+                        sigma_metrics = self._sigma_tracker.get_metrics()
+                        ema_loss = loss_ema.update(step_loss)
+
+                        # Durable, greppable curve — written every optimization step regardless
+                        # of progress-bar / W&B state (the fix for unattended runs).
+                        if metrics_writer is not None:
+                            metrics_writer.write(
+                                build_metrics_row(
+                                    step=self._global_step,
+                                    loss=step_loss,
+                                    ema_loss=ema_loss,
+                                    lr=current_lr,
+                                    step_time=step_time,
+                                    grad_norm=grad_norm,
+                                    extra=sigma_metrics,
+                                )
+                            )
+
                         metrics = {
                             "train/loss": step_loss,
+                            "train/ema_loss": ema_loss,
                             "train/learning_rate": current_lr,
                             "train/step_time": step_time,
                             "train/global_step": self._global_step,
                         }
-                        metrics.update(self._sigma_tracker.get_metrics())
+                        if grad_norm is not None:
+                            metrics["train/grad_norm"] = grad_norm
+                        metrics.update(sigma_metrics)
                         self._log_metrics(metrics)
+
+                        # Coarse-cadence visibility + convergence health, always logged so a
+                        # redirected/unattended run still shows the curve and any warnings.
+                        if self._global_step % METRICS_LOG_INTERVAL == 0:
+                            grad_str = f" | |g|: {grad_norm:.2f}" if grad_norm is not None else ""
+                            logger.info(
+                                f"step {self._global_step}/{cfg.optimization.steps} | "
+                                f"loss {step_loss:.4f} | ema {ema_loss:.4f} | "
+                                f"lr {current_lr:.2e}{grad_str}"
+                            )
+                            status = convergence_monitor.update(step=self._global_step, train_loss=ema_loss)
+                            for msg in status.messages:
+                                logger.warning(f"[convergence] {msg}")
 
                     # Fallback logging when progress bars are disabled
                     if disable_progress_bars and IS_MAIN_PROCESS and self._global_step % 20 == 0:
@@ -340,6 +392,18 @@ class LtxvTrainer:
         if IS_MAIN_PROCESS:
             # Log the training statistics
             self._log_training_stats(stats)
+
+            # End-of-run convergence verdict + flush the metrics file.
+            final_status = convergence_monitor.status()
+            if final_status.messages:
+                logger.info("Convergence summary:")
+                for msg in final_status.messages:
+                    logger.info(f"  - {msg}")
+            else:
+                logger.info("Convergence: no plateau / overfit / not-learning flags raised.")
+            if metrics_writer is not None:
+                logger.info(f"Per-step metrics: {Path(cfg.output_dir) / 'metrics.jsonl'}")
+                metrics_writer.close()
 
             # Upload artifacts to hub if enabled
             if cfg.hub.push_to_hub:
