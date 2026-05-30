@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -176,6 +177,30 @@ class MetricsWriter:
     def close(self) -> None:
         if not self._fh.closed:
             self._fh.close()
+
+
+def paired_difference(
+    measure: "Callable[[Any], float]",
+    a: Any,
+    b: Any,
+    *,
+    save_state: "Callable[[], Any]",
+    restore_state: "Callable[[Any], None]",
+) -> float:
+    """``measure(b) - measure(a)`` evaluated under IDENTICAL RNG, so a *stochastic* measure's
+    randomness cancels and the difference reflects only the ``a -> b`` change.
+
+    This is the load-bearing trick behind the reference-attribution gap (loss with a wrong
+    reference minus loss with the correct one): each forward samples a fresh timestep + noise,
+    so without pinning the RNG the gap would be dominated by sampling variance, not the
+    reference. We snapshot the RNG before ``a``, run it, restore the snapshot, then run ``b`` —
+    both see the same timestep and noise, so a non-zero result is the reference's doing.
+    """
+    state = save_state()
+    ma = measure(a)
+    restore_state(state)
+    mb = measure(b)
+    return mb - ma
 
 
 def build_metrics_row(

@@ -39,7 +39,7 @@ from ltx_trainer.config_display import print_config
 from ltx_trainer.datasets import PrecomputedDataset
 from ltx_trainer.gpu_utils import free_gpu_memory, free_gpu_memory_context, get_gpu_memory_gb
 from ltx_trainer.hf_hub_utils import push_to_hub
-from ltx_trainer.metrics import EMA, ConvergenceMonitor, MetricsWriter, build_metrics_row
+from ltx_trainer.metrics import EMA, ConvergenceMonitor, MetricsWriter, build_metrics_row, paired_difference
 from ltx_trainer.model_loader import load_embeddings_processor, load_text_encoder
 from ltx_trainer.model_loader import load_model as load_ltx_model
 from ltx_trainer.progress import TrainingProgress
@@ -136,6 +136,10 @@ class LtxvTrainer:
         self._training_state_size_warned = False
         self._wandb_run = None
         self._sigma_tracker = SigmaBucketTracker()
+        # Reference-attribution-gap state: the prior batch's reference latents (the "wrong"
+        # reference for the gap, since batch_size is 1) and the most recent computed gap.
+        self._prev_reference: dict[str, Tensor] | None = None
+        self._latest_ref_gap: float | None = None
 
     def train(  # noqa: PLR0912, PLR0915
         self,
@@ -307,8 +311,26 @@ class LtxvTrainer:
                         sigma_metrics = self._sigma_tracker.get_metrics()
                         ema_loss = loss_ema.update(step_loss)
 
-                        # Durable, greppable curve — written every optimization step regardless
-                        # of progress-bar / W&B state (the fix for unattended runs).
+                        # Reference-attribution gap at the (rarer) checkpoint cadence: two extra
+                        # no-grad forwards measuring whether the reference is load-bearing. It
+                        # uses the PRIOR step's reference as the "wrong" one, so compute it before
+                        # caching this step's reference below.
+                        if cfg.checkpoints.interval and self._global_step % cfg.checkpoints.interval == 0:
+                            gap = self._reference_attribution_gap(batch)
+                            if gap is not None:
+                                self._latest_ref_gap = gap
+                                verdict = "load-bearing" if gap > 0 else "decorative (model not using the reference)"
+                                logger.info(
+                                    f"[ref-gap] step {self._global_step}: "
+                                    f"loss(wrong ref) - loss(correct ref) = {gap:+.4f} — {verdict}"
+                                )
+                        if "reference_audio_latents" in batch:
+                            self._prev_reference = batch["reference_audio_latents"]
+
+                        # Durable, greppable curve — every optimization step regardless of
+                        # progress-bar / W&B state (the fix for unattended runs).
+                        extra = dict(sigma_metrics)
+                        extra["ref_gap"] = self._latest_ref_gap
                         if metrics_writer is not None:
                             metrics_writer.write(
                                 build_metrics_row(
@@ -318,7 +340,7 @@ class LtxvTrainer:
                                     lr=current_lr,
                                     step_time=step_time,
                                     grad_norm=grad_norm,
-                                    extra=sigma_metrics,
+                                    extra=extra,
                                 )
                             )
 
@@ -331,6 +353,8 @@ class LtxvTrainer:
                         }
                         if grad_norm is not None:
                             metrics["train/grad_norm"] = grad_norm
+                        if self._latest_ref_gap is not None:
+                            metrics["train/ref_gap"] = self._latest_ref_gap
                         metrics.update(sigma_metrics)
                         self._log_metrics(metrics)
 
@@ -343,7 +367,9 @@ class LtxvTrainer:
                                 f"loss {step_loss:.4f} | ema {ema_loss:.4f} | "
                                 f"lr {current_lr:.2e}{grad_str}"
                             )
-                            status = convergence_monitor.update(step=self._global_step, train_loss=ema_loss)
+                            status = convergence_monitor.update(
+                                step=self._global_step, train_loss=ema_loss, ref_gap=self._latest_ref_gap
+                            )
                             for msg in status.messages:
                                 logger.warning(f"[convergence] {msg}")
 
@@ -465,6 +491,57 @@ class LtxvTrainer:
         sigma = model_inputs.video.sigma.detach() if model_inputs.video.enabled else model_inputs.audio.sigma.detach()
 
         return TrainingStepOutput(loss=loss, sigma=sigma)
+
+    @torch.no_grad()
+    def _forward_loss_no_grad(self, batch: dict[str, Any]) -> float:
+        """Forward + strategy loss for a batch whose text embeddings are ALREADY processed,
+        without gradients. Used only by the reference-attribution gap — never call it on a raw
+        batch: it reuses ``conditions['*_prompt_embeds']`` left in place by ``_training_step``
+        rather than re-running the embeddings processor (which would double-process them)."""
+        model_inputs = self._training_strategy.prepare_training_inputs(batch, self._timestep_sampler)
+        video_pred, audio_pred = self._transformer(
+            video=model_inputs.video,
+            audio=model_inputs.audio,
+            perturbations=None,
+        )
+        loss = self._training_strategy.compute_loss(video_pred, audio_pred, model_inputs)
+        return loss.detach().mean().item()
+
+    def _reference_attribution_gap(self, batch: dict[str, Any]) -> float | None:
+        """``loss(wrong reference) - loss(correct reference)`` under paired noise.
+
+        ``> 0`` means the correct reference lowers the loss — the model is using it, i.e. the
+        reference is load-bearing (the training-time twin of the inference "remove the reference
+        → output stops tracking" check). ``~0`` means the reference is decorative. Returns
+        ``None`` until a previous batch's reference has been cached to act as the "wrong" one
+        (batch_size is 1, so the wrong reference is the prior step's clip — a different target
+        attribute). The two forwards share timestep + noise (see ``metrics.paired_difference``);
+        the whole measurement is wrapped so it leaves the training RNG stream untouched — a pure
+        observer. Main-process / single-GPU only (it forwards on this rank alone)."""
+        if "reference_audio_latents" not in batch or self._prev_reference is None:
+            return None
+
+        def _save_rng() -> tuple[Tensor, list[Tensor] | None]:
+            cuda = torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None
+            return (torch.get_rng_state(), cuda)
+
+        def _restore_rng(state: tuple[Tensor, list[Tensor] | None]) -> None:
+            torch.set_rng_state(state[0])
+            if state[1] is not None:
+                torch.cuda.set_rng_state_all(state[1])
+
+        outer = _save_rng()
+        try:
+            wrong_batch = {**batch, "reference_audio_latents": self._prev_reference}
+            return paired_difference(
+                self._forward_loss_no_grad,
+                batch,  # correct reference
+                wrong_batch,  # wrong reference = the prior step's clip
+                save_state=_save_rng,
+                restore_state=_restore_rng,
+            )
+        finally:
+            _restore_rng(outer)  # leave the training RNG stream exactly as we found it
 
     @free_gpu_memory_context(after=True)
     def _load_text_encoder_and_cache_embeddings(self) -> list[CachedPromptEmbeddings] | None:

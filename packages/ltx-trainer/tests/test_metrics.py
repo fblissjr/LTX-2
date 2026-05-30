@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import json
 
-from ltx_trainer.metrics import EMA, ConvergenceMonitor, MetricsWriter, build_metrics_row
+from ltx_trainer.metrics import EMA, ConvergenceMonitor, MetricsWriter, build_metrics_row, paired_difference
 
 
 # --- EMA ----------------------------------------------------------------------
@@ -146,3 +146,34 @@ def test_build_metrics_row_merges_extra():
     )
     assert row["train/sigma_bucket_0"] == 0.3
     assert row["step"] == 1  # core fields still present alongside the merged extras
+
+
+# --- paired_difference (the reference-attribution-gap noise-pairing trick) -----
+
+
+def test_paired_difference_cancels_shared_randomness():
+    # A stochastic measure: depends on the arg AND an advancing "RNG" counter. Pairing the
+    # state across the two calls must cancel the stochastic term, leaving only the arg diff.
+    state = {"v": 0}
+
+    def measure(x):
+        state["v"] += 1  # stochastic component
+        return x * 10 + state["v"]
+
+    gap = paired_difference(
+        measure, 2.0, 5.0, save_state=lambda: state["v"], restore_state=lambda s: state.update(v=s)
+    )
+    assert gap == (5.0 * 10) - (2.0 * 10)  # the +state term cancels exactly
+
+
+def test_paired_difference_with_torch_rng():
+    # Same trick with the real torch RNG state the trainer uses for the ref-gap forwards.
+    import torch
+
+    def measure(x):
+        return x + torch.randn(()).item()
+
+    gap = paired_difference(
+        measure, 1.0, 3.0, save_state=torch.get_rng_state, restore_state=torch.set_rng_state
+    )
+    assert abs(gap - 2.0) < 1e-6  # identical noise cancels; gap = pure input difference

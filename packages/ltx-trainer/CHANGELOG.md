@@ -12,10 +12,17 @@ uses semantic versioning.
   optimization step (loss, EMA loss, gradient norm, lr, step-time, per-sigma-bucket losses) —
   durable and greppable even when the Rich progress bar is the only live display and stdout is
   redirected (the gap that left an unattended run without a curve). Adds a `ConvergenceMonitor`
-  (under-fit / plateau / converged now; overfit + reference-decorative are accepted and wired
-  forward-compatibly, pending held-out-loss and reference-attribution-gap eval forwards) that
-  logs warnings during the run and an end-of-run verdict. The pre-clip gradient norm (previously
-  discarded) is now captured and surfaced on the progress bar (`|g|`), in the JSONL, and in W&B.
+  (under-fit / plateau / converged / reference-decorative; overfit is accepted forward-compatibly,
+  pending a held-out-loss forward) that logs warnings during the run and an end-of-run verdict. The
+  pre-clip gradient norm (previously discarded) is now captured and surfaced on the progress bar
+  (`|g|`), in the JSONL, and in W&B.
+- Reference-attribution gap: at checkpoint cadence, two extra no-grad forwards measure
+  `loss(wrong reference) − loss(correct reference)` under paired noise (`metrics.paired_difference`
+  pins the RNG so the gap reflects only the reference, not sampling variance, and leaves the
+  training RNG stream untouched). It is the training-time twin of the inference "remove the
+  reference → output stops tracking" check — `> 0` means the reference is load-bearing, `~0` means
+  decorative — and feeds the monitor's reference-decorative flag plus the `ref_gap` metric. The
+  "wrong" reference is the prior step's clip (batch size 1).
 - `audio_reference` training strategy — an **audio-only IC-LoRA** (transfer paradigm):
   an in-context reference *audio* clip steers an attribute of the jointly-generated
   audio+video. The audio stream is `[target (noised) | reference (clean)]` with the
