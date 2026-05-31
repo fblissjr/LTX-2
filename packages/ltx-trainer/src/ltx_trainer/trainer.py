@@ -39,7 +39,14 @@ from ltx_trainer.config_display import print_config
 from ltx_trainer.datasets import PrecomputedDataset
 from ltx_trainer.gpu_utils import free_gpu_memory, free_gpu_memory_context, get_gpu_memory_gb
 from ltx_trainer.hf_hub_utils import push_to_hub
-from ltx_trainer.metrics import EMA, ConvergenceMonitor, MetricsWriter, build_metrics_row, paired_difference
+from ltx_trainer.metrics import (
+    EMA,
+    ConvergenceMonitor,
+    MetricsWriter,
+    build_metrics_row,
+    emit_if_fresh,
+    paired_difference,
+)
 from ltx_trainer.model_loader import load_embeddings_processor, load_text_encoder
 from ltx_trainer.model_loader import load_model as load_ltx_model
 from ltx_trainer.progress import TrainingProgress
@@ -317,10 +324,12 @@ class LtxvTrainer:
                         # no-grad forwards measuring whether the reference is load-bearing. It
                         # uses the PRIOR step's reference as the "wrong" one, so compute it before
                         # caching this step's reference below.
+                        fresh_ref_gap: float | None = None
                         if cfg.checkpoints.interval and self._global_step % cfg.checkpoints.interval == 0:
                             gap = self._reference_attribution_gap(batch)
                             if gap is not None:
                                 self._latest_ref_gap = gap
+                                fresh_ref_gap = gap
                                 verdict = "load-bearing" if gap > 0 else "decorative (model not using the reference)"
                                 logger.info(
                                     f"[ref-gap] step {self._global_step}: "
@@ -330,9 +339,11 @@ class LtxvTrainer:
                             self._prev_reference = batch["reference_audio_latents"]
 
                         # Durable, greppable curve — every optimization step regardless of
-                        # progress-bar / W&B state (the fix for unattended runs).
-                        extra = dict(sigma_metrics)
-                        extra["ref_gap"] = self._latest_ref_gap
+                        # progress-bar / W&B state (the fix for unattended runs). The ref-gap is
+                        # measured only at the (coarser) checkpoint cadence, so emit it ONLY on those
+                        # steps; forward-filling self._latest_ref_gap here would paint a fake flat
+                        # per-step curve in both the JSONL and W&B for a metric that was not resampled.
+                        extra = emit_if_fresh(dict(sigma_metrics), "ref_gap", fresh_ref_gap)
                         if metrics_writer is not None:
                             metrics_writer.write(
                                 build_metrics_row(
@@ -355,8 +366,7 @@ class LtxvTrainer:
                         }
                         if grad_norm is not None:
                             metrics["train/grad_norm"] = grad_norm
-                        if self._latest_ref_gap is not None:
-                            metrics["train/ref_gap"] = self._latest_ref_gap
+                        metrics = emit_if_fresh(metrics, "train/ref_gap", fresh_ref_gap)
                         metrics.update(sigma_metrics)
                         self._log_metrics(metrics)
 

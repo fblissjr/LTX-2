@@ -11,7 +11,14 @@ from __future__ import annotations
 
 import json
 
-from ltx_trainer.metrics import EMA, ConvergenceMonitor, MetricsWriter, build_metrics_row, paired_difference
+from ltx_trainer.metrics import (
+    EMA,
+    ConvergenceMonitor,
+    MetricsWriter,
+    build_metrics_row,
+    emit_if_fresh,
+    paired_difference,
+)
 
 
 # --- EMA ----------------------------------------------------------------------
@@ -146,6 +153,25 @@ def test_build_metrics_row_merges_extra():
     )
     assert row["train/sigma_bucket_0"] == 0.3
     assert row["step"] == 1  # core fields still present alongside the merged extras
+
+
+# --- emit_if_fresh (honest sparse emission of periodically-sampled metrics) ----
+
+
+def test_emit_if_fresh_skips_stale():
+    # ref_gap is measured only at the checkpoint cadence; on the steps in between the value is
+    # None and must be OMITTED, not forward-filled (a forward-filled flat line is a fake signal).
+    assert emit_if_fresh({"loss": 0.5}, "ref_gap", None) == {"loss": 0.5}
+
+
+def test_emit_if_fresh_includes_measured():
+    assert emit_if_fresh({"loss": 0.5}, "ref_gap", 0.03) == {"loss": 0.5, "ref_gap": 0.03}
+
+
+def test_emit_if_fresh_does_not_mutate_input():
+    base = {"loss": 0.5}
+    emit_if_fresh(base, "ref_gap", 0.03)
+    assert "ref_gap" not in base  # returns a new dict, leaves the caller's dict untouched
 
 
 # --- paired_difference (the reference-attribution-gap noise-pairing trick) -----

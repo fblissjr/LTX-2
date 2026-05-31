@@ -230,3 +230,18 @@ def build_metrics_row(
     if extra:
         row.update(extra)
     return row
+
+
+def emit_if_fresh(metrics: dict[str, Any], key: str, value: float | None) -> dict[str, Any]:
+    """Merge a periodically-sampled scalar into a metrics dict ONLY when it was freshly measured
+    this step (``value is not None``), returning a new dict.
+
+    Forward-filling the last measured value onto every step would paint a fake continuous curve in
+    the JSONL / W&B for a metric that is actually sampled at a coarser cadence (e.g. the
+    reference-attribution gap, measured only at the checkpoint interval) — the exact "looks like a
+    signal but isn't" trap. Omitting it on the in-between steps keeps the curve sparse and honest.
+    Returns ``metrics`` unchanged when ``value`` is None.
+    """
+    if value is not None:
+        return {**metrics, key: value}
+    return metrics
