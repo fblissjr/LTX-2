@@ -140,6 +140,7 @@ class LtxvTrainer:
         # reference for the gap, since batch_size is 1) and the most recent computed gap.
         self._prev_reference: dict[str, Tensor] | None = None
         self._latest_ref_gap: float | None = None
+        self._val_dataloader: DataLoader | None = None   # held-out set for the val-loss overfitting detector
 
     def train(  # noqa: PLR0912, PLR0915
         self,
@@ -358,6 +359,25 @@ class LtxvTrainer:
                         metrics.update(sigma_metrics)
                         self._log_metrics(metrics)
 
+                        # Held-out validation pass (the overfitting detector): every
+                        # holdout_interval optimization steps, a no-grad forward+loss on the
+                        # disjoint set -> wandb (train-vs-val live) + JSONL (post-train).
+                        hv = self._config.validation
+                        if hv.holdout_interval and self._global_step % hv.holdout_interval == 0:
+                            val_result = self._validation_loss()
+                            if val_result is not None:
+                                v_loss, v_gap = val_result
+                                vmetrics = {"val/loss": v_loss, "val/global_step": self._global_step}
+                                if v_gap is not None:
+                                    vmetrics["val/ref_gap"] = v_gap
+                                self._log_metrics(vmetrics)
+                                if metrics_writer is not None:
+                                    metrics_writer.write({"step": self._global_step, "val_loss": v_loss, "val_ref_gap": v_gap})
+                                logger.info(
+                                    f"[val] step {self._global_step}: val/loss={v_loss:.4f}"
+                                    + (f"  val/ref_gap={v_gap:+.4f}" if v_gap is not None else "")
+                                )
+
                         # Coarse-cadence visibility + convergence health, always logged so a
                         # redirected/unattended run still shows the curve and any warnings.
                         if self._global_step % METRICS_LOG_INTERVAL == 0:
@@ -452,11 +472,9 @@ class LtxvTrainer:
 
         return saved_path, stats
 
-    def _training_step(self, batch: dict[str, dict[str, Tensor]]) -> TrainingStepOutput:
-        """Perform a single training step using the configured strategy."""
-        # Apply embedding connectors to transform pre-computed text embeddings
-        conditions = batch["conditions"]
-
+    def _prepare_conditions(self, conditions: dict[str, Tensor]) -> None:
+        """Apply the embeddings connectors to the precomputed text features, IN PLACE. Shared by the
+        training step and the held-out val pass so both feed the transformer identical conditioning."""
         if "video_prompt_embeds" in conditions:
             # New format: separate video/audio features from precompute()
             video_features = conditions["video_prompt_embeds"]
@@ -465,16 +483,18 @@ class LtxvTrainer:
             # Legacy format: single prompt_embeds tensor — duplicate for both modalities
             video_features = conditions["prompt_embeds"]
             audio_features = conditions["prompt_embeds"]
-
         mask = conditions["prompt_attention_mask"]
         additive_mask = convert_to_additive_mask(mask, video_features.dtype)
         video_embeds, audio_embeds, attention_mask = self._embeddings_processor.create_embeddings(
             video_features, audio_features, additive_mask
         )
-
         conditions["video_prompt_embeds"] = video_embeds
         conditions["audio_prompt_embeds"] = audio_embeds
         conditions["prompt_attention_mask"] = attention_mask
+
+    def _training_step(self, batch: dict[str, dict[str, Tensor]]) -> TrainingStepOutput:
+        """Perform a single training step using the configured strategy."""
+        self._prepare_conditions(batch["conditions"])
 
         # Use strategy to prepare training inputs (returns ModelInputs with Modality objects)
         model_inputs = self._training_strategy.prepare_training_inputs(batch, self._timestep_sampler)
@@ -507,7 +527,7 @@ class LtxvTrainer:
         loss = self._training_strategy.compute_loss(video_pred, audio_pred, model_inputs)
         return loss.detach().mean().item()
 
-    def _reference_attribution_gap(self, batch: dict[str, Any]) -> float | None:
+    def _reference_attribution_gap(self, batch: dict[str, Any], prev_reference: dict[str, Tensor] | None = None) -> float | None:
         """``loss(wrong reference) - loss(correct reference)`` under paired noise.
 
         ``> 0`` means the correct reference lowers the loss — the model is using it, i.e. the
@@ -518,7 +538,8 @@ class LtxvTrainer:
         attribute). The two forwards share timestep + noise (see ``metrics.paired_difference``);
         the whole measurement is wrapped so it leaves the training RNG stream untouched — a pure
         observer. Main-process / single-GPU only (it forwards on this rank alone)."""
-        if "reference_audio_latents" not in batch or self._prev_reference is None:
+        prev = prev_reference if prev_reference is not None else self._prev_reference
+        if "reference_audio_latents" not in batch or prev is None:
             return None
 
         def _save_rng() -> tuple[Tensor, list[Tensor] | None]:
@@ -532,7 +553,7 @@ class LtxvTrainer:
 
         outer = _save_rng()
         try:
-            wrong_batch = {**batch, "reference_audio_latents": self._prev_reference}
+            wrong_batch = {**batch, "reference_audio_latents": prev}
             return paired_difference(
                 self._forward_loss_no_grad,
                 batch,  # correct reference
@@ -542,6 +563,61 @@ class LtxvTrainer:
             )
         finally:
             _restore_rng(outer)  # leave the training RNG stream exactly as we found it
+
+    @staticmethod
+    def _move_to_device(obj: Any, device: Any) -> Any:
+        """Recursively move tensors in a nested batch dict to ``device`` (val batches are not
+        accelerator-prepared, so they arrive on CPU)."""
+        if torch.is_tensor(obj):
+            return obj.to(device)
+        if isinstance(obj, dict):
+            return {k: LtxvTrainer._move_to_device(v, device) for k, v in obj.items()}
+        if isinstance(obj, (list, tuple)):
+            return type(obj)(LtxvTrainer._move_to_device(v, device) for v in obj)
+        return obj
+
+    @torch.no_grad()
+    def _validation_loss(self) -> tuple[float, float | None] | None:
+        """Held-out val loss (+ reference gap) on the disjoint set — the overfitting detector.
+
+        Compare ``val/loss`` against ``train/loss`` over the run: train falling while val flattens
+        or rises is overfitting. Mirrors the training forward exactly (same ``_prepare_conditions``
+        + strategy + loss) so the two are directly comparable. The whole pass runs under a FIXED
+        seed so every measurement uses the same noise + timesteps (low-variance, comparable across
+        steps), and the RNG is restored afterwards so the training stream is untouched."""
+        if self._val_dataloader is None:
+            return None
+        device = self._accelerator.device
+        was_training = self._transformer.training
+        self._transformer.eval()
+        rng_cpu = torch.get_rng_state()
+        rng_cuda = torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None
+        losses: list[float] = []
+        gaps: list[float] = []
+        prev_ref: dict[str, Tensor] | None = None
+        cap = self._config.validation.holdout_max_batches
+        try:
+            torch.manual_seed(self._config.validation.seed)
+            for i, batch in enumerate(self._val_dataloader):
+                if cap and i >= cap:
+                    break
+                batch = self._move_to_device(batch, device)
+                self._prepare_conditions(batch["conditions"])
+                losses.append(self._forward_loss_no_grad(batch))
+                if prev_ref is not None and "reference_audio_latents" in batch:
+                    g = self._reference_attribution_gap(batch, prev_reference=prev_ref)
+                    if g is not None:
+                        gaps.append(g)
+                prev_ref = batch.get("reference_audio_latents")
+        finally:
+            torch.set_rng_state(rng_cpu)
+            if rng_cuda is not None:
+                torch.cuda.set_rng_state_all(rng_cuda)
+            if was_training:
+                self._transformer.train()
+        if not losses:
+            return None
+        return sum(losses) / len(losses), (sum(gaps) / len(gaps) if gaps else None)
 
     @free_gpu_memory_context(after=True)
     def _load_text_encoder_and_cache_embeddings(self) -> list[CachedPromptEmbeddings] | None:
@@ -958,6 +1034,19 @@ class LtxvTrainer:
         )
 
         self._dataloader = self._accelerator.prepare(dataloader)
+
+        # Held-out (val) loader for the overfitting detector. A plain DataLoader (NOT
+        # accelerator-prepared): the val pass runs no-grad on the main process and moves batches
+        # to device itself, so it stays independent of the distributed sampler / the training
+        # iterator's position when it fires mid-training.
+        holdout = self._config.validation.holdout_data_root
+        if holdout and self._config.validation.holdout_interval:
+            val_ds = PrecomputedDataset(holdout, data_sources=self._training_strategy.get_data_sources())
+            self._val_dataloader = DataLoader(
+                val_ds, batch_size=self._config.optimization.batch_size,
+                shuffle=False, drop_last=True, num_workers=0,
+            )
+            logger.info(f"Held-out val loader: {len(val_ds):,} samples from {holdout}")
 
     def _init_lora_weights(self) -> None:
         """Initialize LoRA weights for the transformer."""

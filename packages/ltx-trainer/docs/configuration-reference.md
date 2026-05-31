@@ -271,6 +271,9 @@ validation:
   generate_audio: true                # Whether to generate audio
   skip_initial_validation: false      # Skip validation at step 0
   include_reference_in_output: false  # Include reference video side-by-side (IC-LoRA)
+  holdout_data_root: null             # Disjoint precomputed set for the held-out val loss
+  holdout_interval: 0                 # Run the held-out val pass every N steps (0 = off)
+  holdout_max_batches: 16             # Cap batches per val pass (0 = whole set)
 ```
 
 **Key parameters:**
@@ -288,6 +291,9 @@ validation:
 | `stg_mode`                    | STG mode: `"stg_av"` perturbs both audio and video, `"stg_v"` perturbs video only                                        |
 | `generate_audio`              | Whether to generate audio in validation samples                                                                          |
 | `include_reference_in_output` | For IC-LoRA: concatenate reference video side-by-side with output                                                        |
+| `holdout_data_root`           | Disjoint precomputed set (e.g. unseen identities) for a held-out val loss + reference gap; `null` disables. Loss-only, so it works for strategies whose generation lives outside the trainer |
+| `holdout_interval`            | Run the held-out val pass every N optimization steps (`0` disables). Train-loss falling while val-loss flattens/rises is overfitting |
+| `holdout_max_batches`         | Cap batches per held-out pass for a fast, low-variance signal (`0` = whole set)                                          |
 
 ### CheckpointsConfig
 

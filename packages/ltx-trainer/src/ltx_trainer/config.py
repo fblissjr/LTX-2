@@ -324,6 +324,29 @@ class ValidationConfig(ConfigBaseModel):
         "with the generated output. The reference comes from the input video, not from the model's output.",
     )
 
+    # --- held-out validation loss (the overfitting detector) -------------------------------------
+    holdout_data_root: str | None = Field(
+        default=None,
+        description="Precomputed held-out dataset root (same layout as data.preprocessed_data_root, "
+        "DISJOINT samples — e.g. unseen identities) used to compute a validation loss + reference gap. "
+        "None disables the held-out pass. This is loss-only (no sample generation), so it works for "
+        "strategies whose generation lives outside the trainer (audio_reference).",
+    )
+
+    holdout_interval: int = Field(
+        default=0,
+        description="Run the held-out val pass every N optimization steps (0 = disabled). Train-loss "
+        "falling while val-loss flattens/rises is overfitting; this is what makes it visible.",
+        ge=0,
+    )
+
+    holdout_max_batches: int = Field(
+        default=0,
+        description="Cap the number of held-out batches per val pass (0 = use the whole held-out set). "
+        "Keep small for a fast, low-variance signal on large held-out sets.",
+        ge=0,
+    )
+
     @field_validator("images")
     @classmethod
     def validate_images(cls, v: list[str] | None, info: ValidationInfo) -> list[str] | None:
