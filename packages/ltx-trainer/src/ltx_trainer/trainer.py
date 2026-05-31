@@ -21,14 +21,7 @@ from pydantic import BaseModel
 from safetensors.torch import load_file, save_file
 from torch import Tensor
 from torch.optim import AdamW
-from torch.optim.lr_scheduler import (
-    CosineAnnealingLR,
-    CosineAnnealingWarmRestarts,
-    LinearLR,
-    LRScheduler,
-    PolynomialLR,
-    StepLR,
-)
+from torch.optim.lr_scheduler import LRScheduler
 from torch.utils.data import DataLoader
 from torchvision.transforms import functional as F  # noqa: N812
 
@@ -39,6 +32,7 @@ from ltx_trainer.config_display import print_config
 from ltx_trainer.datasets import PrecomputedDataset
 from ltx_trainer.gpu_utils import free_gpu_memory, free_gpu_memory_context, get_gpu_memory_gb
 from ltx_trainer.hf_hub_utils import push_to_hub
+from ltx_trainer.lr_schedulers import build_lr_scheduler
 from ltx_trainer.metrics import (
     EMA,
     ConvergenceMonitor,
@@ -1112,57 +1106,13 @@ class LtxvTrainer:
                 state[k] = state[k].to(device)
 
     def _create_scheduler(self, optimizer: torch.optim.Optimizer) -> LRScheduler | None:
-        """Create learning rate scheduler based on config."""
-        scheduler_type = self._config.optimization.scheduler_type
-        steps = self._config.optimization.steps
-        params = self._config.optimization.scheduler_params or {}
-
-        if scheduler_type is None:
-            return None
-
-        if scheduler_type == "linear":
-            scheduler = LinearLR(
-                optimizer,
-                start_factor=params.pop("start_factor", 1.0),
-                end_factor=params.pop("end_factor", 0.1),
-                total_iters=steps,
-                **params,
-            )
-        elif scheduler_type == "cosine":
-            scheduler = CosineAnnealingLR(
-                optimizer,
-                T_max=steps,
-                eta_min=params.pop("eta_min", 0),
-                **params,
-            )
-        elif scheduler_type == "cosine_with_restarts":
-            scheduler = CosineAnnealingWarmRestarts(
-                optimizer,
-                T_0=params.pop("T_0", steps // 4),
-                T_mult=params.pop("T_mult", 1),
-                eta_min=params.pop("eta_min", 5e-5),
-                **params,
-            )
-        elif scheduler_type == "polynomial":
-            scheduler = PolynomialLR(
-                optimizer,
-                total_iters=steps,
-                power=params.pop("power", 1.0),
-                **params,
-            )
-        elif scheduler_type == "step":
-            scheduler = StepLR(
-                optimizer,
-                step_size=params.pop("step_size", steps // 2),
-                gamma=params.pop("gamma", 0.1),
-                **params,
-            )
-        elif scheduler_type == "constant":
-            scheduler = None
-        else:
-            raise ValueError(f"Unknown scheduler type: {scheduler_type}")
-
-        return scheduler
+        """Create learning rate scheduler based on config. See ``lr_schedulers.build_lr_scheduler``."""
+        return build_lr_scheduler(
+            optimizer,
+            scheduler_type=self._config.optimization.scheduler_type,
+            steps=self._config.optimization.steps,
+            params=self._config.optimization.scheduler_params or {},
+        )
 
     def _setup_accelerator(self) -> None:
         """Initialize the Accelerator with the appropriate settings."""
