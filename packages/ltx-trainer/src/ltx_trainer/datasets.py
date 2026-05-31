@@ -290,11 +290,12 @@ class PrecomputedDataset(Dataset):
 
     @staticmethod
     def _maybe_pick_variant(data: dict) -> dict:
-        """If ``data`` is a variant-stacked latent (``variants > 1``, latents ``[K, C, T, F]``),
-        pick one variant at random along dim 0 and return ``[C, T, F]``. Self-describing via the
-        ``variants`` key (set by the precompute), so this is independent of source naming and the
-        4D video-latent shape. Uses torch's RNG so DataLoader workers get independent picks."""
-        if isinstance(data, dict) and data.get("variants", 1) and data.get("variants", 1) > 1:
+        """If ``data`` is a variant-stacked latent (has a ``variants`` key, latents ``[K, C, T, F]``),
+        reduce the leading variant dim to a single ``[C, T, F]``: a random pick for K>1, the only one
+        for K=1 (K=1 must still be squeezed or it collates to a 5-dim batch and the patchifier crashes).
+        Self-describing via the ``variants`` key (set by the precompute), so this is independent of
+        source naming and the 4D video-latent shape. Uses torch's RNG so workers pick independently."""
+        if isinstance(data, dict) and "variants" in data:
             k = int(torch.randint(data["latents"].shape[0], (1,)).item())
             data = {**data, "latents": data["latents"][k], "variants": 1}
         return data

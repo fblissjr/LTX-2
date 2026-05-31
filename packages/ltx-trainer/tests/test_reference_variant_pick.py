@@ -23,6 +23,14 @@ def test_pick_is_noop_without_variants_key():
     assert "variants" not in out or out["variants"] == 1
 
 
+def test_pick_squeezes_single_variant():
+    # identities with few clips yield K=1 -> stack is [1, C, T, F] with variants=1; it must STILL be
+    # reduced to [C, T, F], else it collates to a 5-dim batch and the audio patchifier crashes.
+    data = {"latents": torch.zeros(1, 8, 5, 16), "variants": 1}
+    out = PrecomputedDataset._maybe_pick_variant(data)
+    assert out["latents"].shape == (8, 5, 16)
+
+
 def test_pick_varies_across_calls():
     torch.manual_seed(0)
     stacked = torch.stack([torch.full((8, 5, 16), float(k)) for k in range(3)])
