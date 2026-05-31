@@ -63,14 +63,12 @@ def _compare(name: str, a: torch.Tensor, b: torch.Tensor) -> None:
     )
 
 
-@torch.inference_mode()
-def _encode(model_path: str, wav: torch.Tensor, sr: int, device: torch.device,
-            pre_resample_to: int | None = None) -> tuple[torch.Tensor, dict]:
-    """Load the audio VAE from ``model_path`` (fp32) and encode ``wav`` the trainer's way.
+def _load_vae(model_path: str, device: torch.device):
+    """Load the audio VAE encoder (fp32) + its matching processor + config, once per model.
 
-    ``pre_resample_to`` optionally resamples the waveform BEFORE the trainer encode (the
-    AudioProcessor then resamples again to the VAE's own rate) -- used to model an eval node
-    that resamples to the wrong target first.
+    Kept separate from :func:`_encode` so a single loaded encoder can serve many encodes (the
+    train VAE drives the canonical encode AND the resample-sensitivity probes); reloading the
+    checkpoint's VAE per encode would be the bulk of the runtime.
     """
     encoder = load_audio_vae_encoder(model_path, device=device, dtype=torch.float32)
     processor = build_audio_processor(encoder).to(device)
@@ -81,12 +79,22 @@ def _encode(model_path: str, wav: torch.Tensor, sr: int, device: torch.device,
         "n_fft": encoder.n_fft,
         "in_channels": getattr(encoder, "in_channels", None),
     }
+    return encoder, processor, cfg
+
+
+@torch.inference_mode()
+def _encode(encoder, processor, wav: torch.Tensor, sr: int, pre_resample_to: int | None = None) -> torch.Tensor:
+    """Encode ``wav`` the trainer's way with an already-loaded encoder/processor -> ``[C, T, F]``.
+
+    ``pre_resample_to`` optionally resamples the waveform BEFORE the encode (the AudioProcessor
+    then resamples again to the VAE's own rate) -- used to model an eval node that resamples to
+    the wrong target first.
+    """
     w, s = wav, sr
     if pre_resample_to is not None and pre_resample_to != sr:
         w = torchaudio.functional.resample(wav, sr, pre_resample_to)
         s = pre_resample_to
-    out = encode_reference_waveform(encoder, processor, w, s)
-    return out["latents"].float().cpu(), cfg  # [C, T, F]
+    return encode_reference_waveform(encoder, processor, w, s)["latents"].float().cpu()
 
 
 def main() -> None:
@@ -103,7 +111,8 @@ def main() -> None:
     print(f"reference: {args.reference.name}  waveform={tuple(wav.shape)} @ {sr} Hz  ({wav.shape[-1] / sr:.2f}s)")
 
     # --- ground truth: training's VAE (from the full checkpoint), the trainer's exact encode ---
-    latent_train, cfg = _encode(args.train_model_path, wav, sr, device)
+    enc_train, proc_train, cfg = _load_vae(args.train_model_path, device)
+    latent_train = _encode(enc_train, proc_train, wav, sr)
     print(f"\ntraining audio VAE config: {cfg}")
     print(f"canonical reference latent [C,T,F] = {tuple(latent_train.shape)}; tokens [T, C*F] = {tuple(_patchify(latent_train).shape)}")
     print(f"  stats: mean={latent_train.mean():.4g}  std={latent_train.std():.4g}  min={latent_train.min():.4g}  max={latent_train.max():.4g}")
@@ -113,7 +122,8 @@ def main() -> None:
     # Axis 1: VAE weights -- standalone eval VAE vs training's in-checkpoint VAE.
     if args.eval_vae_path:
         try:
-            latent_eval, cfg_eval = _encode(args.eval_vae_path, wav, sr, device)
+            enc_eval, proc_eval, cfg_eval = _load_vae(args.eval_vae_path, device)
+            latent_eval = _encode(enc_eval, proc_eval, wav, sr)
             if cfg_eval != cfg:
                 print(f"  [eval-VAE config] DIFFERS: {cfg_eval}")
             _compare("VAE-weights: eval standalone vs training in-checkpoint", latent_train, latent_eval)
@@ -121,8 +131,9 @@ def main() -> None:
             print(f"  [VAE-weights] could not load/encode with --eval-vae-path: {type(e).__name__}: {e}")
 
     # Axis 2: preprocessing sensitivity -- wrong resample target (e.g. a node defaulting to 44100).
+    # Reuses the already-loaded train encoder; only the waveform's pre-resample changes.
     for wrong in (44100, 48000):
-        latent_wrong, _ = _encode(args.train_model_path, wav, sr, device, pre_resample_to=wrong)
+        latent_wrong = _encode(enc_train, proc_train, wav, sr, pre_resample_to=wrong)
         _compare(f"preprocess: pre-resampled to {wrong} Hz then encoded", latent_train, latent_wrong)
 
     if args.save_latent:
