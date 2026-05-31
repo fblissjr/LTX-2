@@ -13,7 +13,7 @@ import torch
 import wandb
 import yaml
 from accelerate import Accelerator, DistributedDataParallelKwargs, DistributedType
-from accelerate.utils import gather_object, set_seed
+from accelerate.utils import gather_object, send_to_device, set_seed
 from peft import LoraConfig, get_peft_model, get_peft_model_state_dict, set_peft_model_state_dict
 from peft.tuners.tuners_utils import BaseTunerLayer
 from peft.utils import ModulesToSaveWrapper
@@ -140,6 +140,7 @@ class LtxvTrainer:
         # reference for the gap, since batch_size is 1) and the most recent computed gap.
         self._prev_reference: dict[str, Tensor] | None = None
         self._latest_ref_gap: float | None = None
+        self._latest_val_loss: float | None = None       # last held-out val loss (fed to the convergence monitor)
         self._val_dataloader: DataLoader | None = None   # held-out set for the val-loss overfitting detector
 
     def train(  # noqa: PLR0912, PLR0915
@@ -362,11 +363,11 @@ class LtxvTrainer:
                         # Held-out validation pass (the overfitting detector): every
                         # holdout_interval optimization steps, a no-grad forward+loss on the
                         # disjoint set -> wandb (train-vs-val live) + JSONL (post-train).
-                        hv = self._config.validation
-                        if hv.holdout_interval and self._global_step % hv.holdout_interval == 0:
+                        if cfg.validation.holdout_interval and self._global_step % cfg.validation.holdout_interval == 0:
                             val_result = self._validation_loss()
                             if val_result is not None:
                                 v_loss, v_gap = val_result
+                                self._latest_val_loss = v_loss   # fed to the convergence monitor below
                                 vmetrics = {"val/loss": v_loss, "val/global_step": self._global_step}
                                 if v_gap is not None:
                                     vmetrics["val/ref_gap"] = v_gap
@@ -388,7 +389,8 @@ class LtxvTrainer:
                                 f"lr {current_lr:.2e}{grad_str}"
                             )
                             status = convergence_monitor.update(
-                                step=self._global_step, train_loss=ema_loss, ref_gap=self._latest_ref_gap
+                                step=self._global_step, train_loss=ema_loss,
+                                heldout_loss=self._latest_val_loss, ref_gap=self._latest_ref_gap
                             )
                             for msg in status.messages:
                                 logger.warning(f"[convergence] {msg}")
@@ -564,18 +566,6 @@ class LtxvTrainer:
         finally:
             _restore_rng(outer)  # leave the training RNG stream exactly as we found it
 
-    @staticmethod
-    def _move_to_device(obj: Any, device: Any) -> Any:
-        """Recursively move tensors in a nested batch dict to ``device`` (val batches are not
-        accelerator-prepared, so they arrive on CPU)."""
-        if torch.is_tensor(obj):
-            return obj.to(device)
-        if isinstance(obj, dict):
-            return {k: LtxvTrainer._move_to_device(v, device) for k, v in obj.items()}
-        if isinstance(obj, (list, tuple)):
-            return type(obj)(LtxvTrainer._move_to_device(v, device) for v in obj)
-        return obj
-
     @torch.no_grad()
     def _validation_loss(self) -> tuple[float, float | None] | None:
         """Held-out val loss (+ reference gap) on the disjoint set — the overfitting detector.
@@ -596,15 +586,16 @@ class LtxvTrainer:
         gaps: list[float] = []
         prev_ref: dict[str, Tensor] | None = None
         cap = self._config.validation.holdout_max_batches
+        gap_pairs = 4   # the ref-gap costs 2 extra forwards per pair; a few pairs is enough signal
         try:
             torch.manual_seed(self._config.validation.seed)
             for i, batch in enumerate(self._val_dataloader):
                 if cap and i >= cap:
                     break
-                batch = self._move_to_device(batch, device)
+                batch = send_to_device(batch, device)
                 self._prepare_conditions(batch["conditions"])
                 losses.append(self._forward_loss_no_grad(batch))
-                if prev_ref is not None and "reference_audio_latents" in batch:
+                if len(gaps) < gap_pairs:   # returns None on the first batch (no prev reference yet)
                     g = self._reference_attribution_gap(batch, prev_reference=prev_ref)
                     if g is not None:
                         gaps.append(g)
