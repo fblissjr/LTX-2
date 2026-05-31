@@ -276,6 +276,10 @@ class PrecomputedDataset(Dataset):
                 if "latent" in dir_name.lower():
                     data = self._normalize_video_latents(data)
 
+                # K-variant references: a [K, C, T, F] stack marked `variants: K` -> pick one at
+                # random per load (per-epoch augmentation; keeps the batch shape unchanged downstream).
+                data = self._maybe_pick_variant(data)
+
                 result[output_key] = data
             except Exception as e:
                 raise RuntimeError(f"Failed to load {output_key} from {file_path}: {e}") from e
@@ -283,6 +287,17 @@ class PrecomputedDataset(Dataset):
         # Add index for debugging
         result["idx"] = index
         return result
+
+    @staticmethod
+    def _maybe_pick_variant(data: dict) -> dict:
+        """If ``data`` is a variant-stacked latent (``variants > 1``, latents ``[K, C, T, F]``),
+        pick one variant at random along dim 0 and return ``[C, T, F]``. Self-describing via the
+        ``variants`` key (set by the precompute), so this is independent of source naming and the
+        4D video-latent shape. Uses torch's RNG so DataLoader workers get independent picks."""
+        if isinstance(data, dict) and data.get("variants", 1) and data.get("variants", 1) > 1:
+            k = int(torch.randint(data["latents"].shape[0], (1,)).item())
+            data = {**data, "latents": data["latents"][k], "variants": 1}
+        return data
 
     @staticmethod
     def _normalize_video_latents(data: dict) -> dict:
