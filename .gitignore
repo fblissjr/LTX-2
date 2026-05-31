@@ -20,6 +20,9 @@ checkpoints/
 tmp
 .wandb
 
+# Run logs (may contain local model paths from the config dump)
+*.log
+
 # Model checkpoints
 *.ckpt
 *.pt
