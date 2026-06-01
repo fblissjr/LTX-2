@@ -367,11 +367,16 @@ class LtxvTrainer:
                         # Held-out validation pass (the overfitting detector): every
                         # holdout_interval optimization steps, a no-grad forward+loss on the
                         # disjoint set -> wandb (train-vs-val live) + JSONL (post-train).
+                        # fresh_val_loss is None except on the steps a held-out pass actually ran, so the
+                        # convergence monitor below is fed a fresh value or nothing -- never a stale
+                        # forward-fill (which would corrupt its consecutive-rise overfit counter).
+                        fresh_val_loss: float | None = None
                         if cfg.validation.holdout_interval and self._global_step % cfg.validation.holdout_interval == 0:
                             val_result = self._validation_loss()
                             if val_result is not None:
                                 v_loss, v_gap = val_result
-                                self._latest_val_loss = v_loss   # fed to the convergence monitor below
+                                self._latest_val_loss = v_loss   # latest estimate (kept for any later reader)
+                                fresh_val_loss = v_loss          # the value actually fed to the monitor below
                                 vmetrics = {"val/loss": v_loss, "val/global_step": self._global_step}
                                 if v_gap is not None:
                                     vmetrics["val/ref_gap"] = v_gap
@@ -394,10 +399,19 @@ class LtxvTrainer:
                             )
                             status = convergence_monitor.update(
                                 step=self._global_step, train_loss=ema_loss,
-                                heldout_loss=self._latest_val_loss, ref_gap=self._latest_ref_gap
+                                heldout_loss=fresh_val_loss, ref_gap=fresh_ref_gap
                             )
                             for msg in status.messages:
                                 logger.warning(f"[convergence] {msg}")
+                            # Opt-in val-guided early stop. The monitor lives on the main rank only, so
+                            # raise accelerate's cross-process trigger here and break on ALL ranks below
+                            # (a bare break on main alone would deadlock multi-GPU at wait_for_everyone).
+                            if cfg.optimization.early_stop_on_convergence and status.should_stop:
+                                logger.info(
+                                    f"[convergence] early-stopping at step {self._global_step}: "
+                                    + "; ".join(status.messages)
+                                )
+                                self._accelerator.set_trigger()
 
                     # Fallback logging when progress bars are disabled
                     if disable_progress_bars and IS_MAIN_PROCESS and self._global_step % 20 == 0:
@@ -418,6 +432,13 @@ class LtxvTrainer:
                     if step % MEMORY_CHECK_INTERVAL == 0:
                         current_mem = get_gpu_memory_gb(device)
                         peak_mem_during_training = max(peak_mem_during_training, current_mem)
+
+                    # Cross-process val-guided early stop: the main rank set the trigger when the
+                    # convergence monitor reported should_stop; all ranks observe it here and break
+                    # together so the post-loop checkpoint + stats still run. No-op unless opted in.
+                    if is_optimization_step and self._accelerator.check_trigger():
+                        logger.info(f"Early stop: convergence trigger observed at step {self._global_step}.")
+                        break
 
         # Collect final stats
         train_end_time = time.time()

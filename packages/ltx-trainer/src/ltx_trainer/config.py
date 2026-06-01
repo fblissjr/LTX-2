@@ -147,6 +147,16 @@ class OptimizationConfig(ConfigBaseModel):
         description="Parameters for the scheduler",
     )
 
+    early_stop_on_convergence: bool = Field(
+        default=False,
+        description=(
+            "When True, the training loop stops early once the convergence "
+            "monitor reports should_stop (held-out loss overfitting OR "
+            "train+held-out converged). Default False preserves the current "
+            "run-to-completion behavior."
+        ),
+    )
+
     enable_gradient_checkpointing: bool = Field(
         default=False,
         description="Enable gradient checkpointing to save memory at the cost of slower training",

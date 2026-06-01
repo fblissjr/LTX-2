@@ -3,7 +3,7 @@
 import pytest
 from pydantic import ValidationError
 
-from ltx_trainer.config import ValidationConfig
+from ltx_trainer.config import OptimizationConfig, ValidationConfig
 
 
 def test_holdout_fields_default_off():
@@ -23,3 +23,15 @@ def test_holdout_fields_settable():
 def test_holdout_interval_non_negative():
     with pytest.raises(ValidationError):
         ValidationConfig(holdout_interval=-1)
+
+
+def test_early_stop_on_convergence_defaults_to_false():
+    """early_stop_on_convergence defaults to False (run-to-completion)."""
+    c = OptimizationConfig()
+    assert c.early_stop_on_convergence is False
+
+
+def test_early_stop_on_convergence_accepts_and_roundtrips_true():
+    """Setting early_stop_on_convergence=True is accepted and round-trips."""
+    c = OptimizationConfig(early_stop_on_convergence=True)
+    assert c.early_stop_on_convergence is True

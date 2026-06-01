@@ -55,8 +55,28 @@ uses semantic versioning.
   compares the recovered periodic-signal rate to the expected rate, to
   characterize the video VAE's temporal-aliasing ceiling on periodic visual
   signals (read-only diagnostic).
+- Cosine learning-rate schedule with optional linear warmup. The scheduler is now a
+  pure, unit-tested builder (`lr_schedulers.build_lr_scheduler`) factored out of the
+  trainer: a `LinearLR` ramp-in chained before `CosineAnnealingLR` via `SequentialLR`,
+  with `eta_min` flooring the annealed tail.
+- Opt-in early stopping on convergence (`OptimizationConfig.early_stop_on_convergence`,
+  default off): the training loop can break when the `ConvergenceMonitor` signals.
+  The monitor is fed only freshly-computed held-out values so its overfit counter is
+  not corrupted by stale, forward-filled metrics.
+
+### Changed
+
+- The reference-attribution gap (`ref_gap`) now emits sparsely — only when freshly
+  recomputed (via `metrics.emit_if_fresh`) — instead of forward-filling a stale value
+  into every per-step metrics row and W&B point, which had produced a misleadingly flat
+  per-step curve. The held-out `val_ref_gap` was already honest.
 
 ### Fixed
+
+- Single-variant (`K=1`) reference precompute: identities with the minimum clip count
+  produced a reference stack whose leading variant dimension the dataset variant-picker
+  skipped, leaving an extra dim that collated to a 5-D batch and crashed the audio
+  patchifier at the first step. The leading variant dim is now reduced for any `K >= 1`.
 
 - Mono audio now encodes through the audio VAE: the VAE expects a 2-channel (stereo)
   mel, so mono speech/tones previously crashed the audio precompute. `ensure_audio_channels`
