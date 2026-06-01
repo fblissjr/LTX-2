@@ -60,6 +60,20 @@ def test_linear_branch_unchanged():
     assert abs(_lr(opt) - lr * 0.1) < lr * 0.02  # end_factor default 0.1
 
 
+def test_cosine_eta_min_accepts_string_from_yaml():
+    # scheduler_params is an untyped dict, so PyYAML hands bare "2e-5" through as a STRING (it only
+    # parses 2.0e-5 as a float). The builder must coerce it or CosineAnnealingLR's arithmetic blows up.
+    lr = 2e-4
+    opt = _opt(lr)
+    sched = build_lr_scheduler(
+        opt, scheduler_type="cosine", steps=20, params={"eta_min": "2e-5", "warmup_steps": "0"}
+    )
+    for _ in range(20):
+        opt.step()
+        sched.step()
+    assert _lr(opt) >= 2e-5 - 1e-9  # floored at the (string-supplied) eta_min, no crash
+
+
 def test_constant_returns_none():
     assert build_lr_scheduler(_opt(1e-4), scheduler_type="constant", steps=10, params={}) is None
 

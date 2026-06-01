@@ -49,8 +49,10 @@ def build_lr_scheduler(
         )
 
     if scheduler_type == "cosine":
+        # scheduler_params is an untyped dict, so YAML may deliver these as strings ("2e-5") -
+        # coerce, or torch's LR arithmetic raises a TypeError.
         warmup = int(params.pop("warmup_steps", 0))
-        eta_min = params.pop("eta_min", 0)
+        eta_min = float(params.pop("eta_min", 0))
         cosine = CosineAnnealingLR(optimizer, T_max=max(1, steps - warmup), eta_min=eta_min, **params)
         if warmup > 0:
             warm = LinearLR(optimizer, start_factor=1e-2, end_factor=1.0, total_iters=warmup)
@@ -60,9 +62,9 @@ def build_lr_scheduler(
     if scheduler_type == "cosine_with_restarts":
         return CosineAnnealingWarmRestarts(
             optimizer,
-            T_0=params.pop("T_0", steps // 4),
-            T_mult=params.pop("T_mult", 1),
-            eta_min=params.pop("eta_min", 5e-5),
+            T_0=int(params.pop("T_0", steps // 4)),
+            T_mult=int(params.pop("T_mult", 1)),
+            eta_min=float(params.pop("eta_min", 5e-5)),
             **params,
         )
 
