@@ -1,108 +1,103 @@
-Last updated: 2026-05-29
+Last updated: 2026-06-01
 
-# Audio→video IC-LoRA — trainer-side notes (experimental)
+# Audio-only IC-LoRA — trainer-side notes (experimental)
 
-Experimental notes on the trainer changes in this LTX-2 fork that support training a
-small audio-conditioned IC-LoRA on the 22B distilled model **on a single 24 GB
-consumer GPU**. This is the training half of a two-repo effort; the data design,
-ComfyUI inference, and eval live in the companion repo (a ComfyUI custom-node pack).
-Its `docs/audio_iclora/index.md` is the experiment hub and `docs/audio_iclora/method_notes.md`
-is the top-level writeup — both honest about what does and doesn't work.
+Notes on the trainer changes in this LTX-2 fork that support training an audio-only IC-LoRA on the
+22B distilled model **on a single 24 GB consumer GPU**. "Audio-only" means the in-context reference
+is an audio clip: no image, no video, no init frame. The model still generates audio and video
+jointly; only the reference is audio. This is the training half of a two-repo effort; the ComfyUI
+inference nodes, the data build, and the eval live in the companion node pack (ComfyUI-AudioLoopHelper,
+`docs/audio_iclora/`). Released checkpoints + the full model card:
+[fbjr/LTX-2.3-22b-IC-LoRA-Audio-Only-Context](https://huggingface.co/fbjr/LTX-2.3-22b-IC-LoRA-Audio-Only-Context).
 
-Voice here matches that writeup: observed facts or explicit guesses, no hype. We
-have **not** demonstrated a working audio IC-LoRA. This doc describes the machinery
-that lets someone try.
+Voice here is observed-facts-or-explicit-guesses, no hype. Short version of the result: the audio
+reference **does** steer generation (the generated speech and the speaker's mannerisms follow it), but
+it has not been through a controlled quantitative eval, so treat it as a working-looking proof of
+concept, not a benchmarked capability.
 
-## The one thing that matters most: it fits on a 4090
+## It fits on a 4090
 
-The 22B distilled LTX-2 model does not fit on 24 GB for LoRA training the naive way.
-What makes it fit:
+The 22B distilled model does not fit on 24 GB for LoRA training the naive way. What makes it fit:
 
-- **Block-swap** (`packages/ltx-trainer/src/ltx_trainer/block_swap.py`). Most
-  transformer blocks are wrapped in a `StreamingBlockWrapper` and streamed between
-  CPU and GPU during the forward/backward pass; only a handful stay resident.
-  `attach_block_swap(..., block_swap_blocks=36)` was the configuration we ran.
+- **Block-swap** (`block_swap.py`): most transformer blocks are wrapped in a `StreamingBlockWrapper`
+  and streamed CPU<->GPU during forward/backward; a handful stay resident. We ran `block_swap_blocks=36`.
 - **int8 quantization** (optimum-quanto) of the base weights.
 - **Gradient checkpointing** + an 8-bit optimizer.
 
-Observed envelope on a 4090: VRAM ~21.7 GB at attach dropping to ~8.9 GB resident
-after the swap setup, ~17 GB peak during training, ~43 min for 300 steps (~8.7
-s/step). These are single-run observations, not benchmarks.
+Observed at 512x512x121: ~22 GB at attach dropping to ~9 GB resident after the swap setup, ~20.6 GB
+peak during training, ~11.5 s/step. `batch_size > 1` OOMs at this resolution (block-swap is near its
+floor), so single-sample steps are the ceiling. A wrinkle: block-swap serializes a spurious `.block.`
+segment into saved LoRA key names; `strip_block_swap_prefix()` runs in the save path so checkpoints
+load in ComfyUI without a converter.
 
-A wrinkle worth knowing: block-swap serializes a spurious `.block.` segment into the
-saved LoRA key names (an artifact of the wrapper). `strip_block_swap_prefix()` is
-called in the save path so checkpoints load in ComfyUI without a converter. (The
-companion repo also ships a standalone converter as a fallback.)
+## The `audio_reference` strategy (audio AS the in-context reference)
 
-## What "audio guides video" means in the strategy
+`training_strategies/audio_reference.py`. The audio stream is `[target (noised) | reference (clean)]`:
+the target audio leads and stays in the loss; the reference is appended **clean** at distinct
+**negative** RoPE positions as out-of-timeline context (the LipDub / ID-LoRA convention), and is
+excluded from the loss. The target is audio+video; the video is generated from noise and follows the
+(reference-influenced) audio through the joint model. Train/inference RoPE parity is load-bearing and
+locked by a test.
 
-Training reuses the existing `video_to_video` IC-LoRA strategy in
-`audio_mode: condition`:
+**Two cuts (the only difference between the two released checkpoints), set by `lora.target_modules`:**
+- **audio-only:** `audio_attn1/2`, `audio_ff`. The reference shapes the generated audio; the video
+  follows via the frozen base coupling (subtler video effect, smallest footprint on the base).
+- **cross-modal:** the above **plus** `audio_to_video_attn` / `video_to_audio_attn`. The bridge is the
+  only path the audio reference reaches the video stream, so adapting it couples the reference into the
+  video more strongly. Example config: `configs/ltx2_audio_reference.yaml`.
 
-- The audio latent is fed **clean** (as context, conditioning timestep 0); the loss
-  is on the **video**. So the gradient flows through the audio→video cross-modal
-  path while the model learns to reconstruct video that matches the frozen audio.
-- This is **not** a separate "audio reference" strategy. The in-context reference is
-  a *video* (or, in our final dataset, a static frame); the audio enters through the
-  model's native audio stream, not as the IC reference. A true audio-reference
-  variant (audio as the in-context signal, LipDub-style) would need a different data
-  path and is not built here.
-- Config: `packages/ltx-trainer/configs/ltx2_audio_coupling_ic_lora.yaml`. The
-  load-bearing choice is `target_modules`: **audio-side modules only** (audio
-  self-attn, audio cross-attn, audio FFN, and the audio→video bridge), explicitly
-  **not** the broad `to_k/to_q/to_v/to_out.0` set. The why is in the config's own
-  header comment and the companion repo's notes: a broad set on an audio-video
-  checkpoint spends adapter capacity on video self-attn and was observed to *degrade*
-  the base model's working audio coupling.
+(There is also an older `video_to_video` `audio_mode: condition` path for coupling experiments; the
+audio-only-reference work above supersedes it for this task.)
 
-## Synthetic data generators (`synthetic_av.py`)
+## Observability, and the metric that fooled us
 
-Procedural, CPU-only, no model. Three dataset builders, in the order we learned to
-need them (the companion repo's notes explain the reasoning and the two leaks we hit):
+Built so we are not blind the way the first run was (`metrics.py` + the trainer loop):
+- **Held-out val loss** every `validation.holdout_interval` steps on a disjoint, held-out-by-identity
+  set. Train falling while val flattens/rises = overfitting. Fed to a `ConvergenceMonitor` that can
+  early-stop (`optimization.early_stop_on_convergence`).
+- **Reference-attribution gap (`ref_gap`)**: loss with the correct reference minus loss with a wrong
+  one, under paired noise so the difference isolates the reference. Positive = the reference helped.
+- Always-on `metrics.jsonl` (the durable record; do not rely on W&B alone, and note W&B SDK 0.24.0
+  has a `finish()` hang — keep it off until upgraded).
 
-- `generate_dataset` — v1, reference = target. **Known-broken for this task** (lets
-  the model copy the reference and ignore audio). Kept for the integration smoke
-  test; do not train a real run on it.
-- `generate_dataset_paired_refs` — v2, reference ≠ target with different BPM. Better,
-  but in a narrow BPM range the reference/target BPMs become correlated (a measured
-  leak). Superseded.
-- `generate_dataset_static_ref` — v3, frozen identity reference (no pulse, no audio).
-  The reference can't carry a rate, so audio is the only time-varying signal. This is
-  what we trained.
+**The lesson worth carrying:** for an *identity* task, `ref_gap` reads ~0 at every noise level **by
+construction**, and that is not a verdict that the model failed. `ref_gap` measures whether the
+reference helps *reconstruct the target*, and the target video already shows the face, so the model
+never needs the reference to reconstruct it (the "leak"). The clean test is **generation from noise**
+(swap only the reference and watch the output), which is the companion repo's eval, not a
+reconstruction-loss number. `ref_gap` is still useful as an overfit probe and would be informative for
+an attribute the video *can't* leak (e.g. pitch, or audio->audio).
 
-Helpers: `generate_beat_pulse_clip` (the target — a shape pulsing on a click track),
-`generate_static_identity_clip` (the frozen reference). `measure_pulse_rate` recovers
-BPM from per-frame brightness, so the coupling is in principle measurable.
+## Recipe (data-independent discipline)
 
-A representability caveat baked into the data defaults: the video VAE compresses ~8×
-in time, so a per-beat pulse aliases above ~`fps × 3.75` ≈ 94 BPM at 25 fps. The v3
-default BPM range is sub-Nyquist (≤85) for that reason.
+The seesaw: for the audio reference to control an attribute (not the caption), the reference and target
+must **differ in content and share only that attribute**, caption neutral. For identity: same speaker,
+different clip, neutral caption. Reference is a fixed 3.5 s window from a different clip of the same
+speaker, appended clean. Precompute targets with `process_dataset.py --with-audio` and the reference
+windows separately; train with `audio_reference`. To adapt to a new attribute, change only the pairing.
 
-## Data validation before you burn GPU
+## Honest status / next
 
-`verify_training_data.py` runs on the precomputed dataset (output of
-`process_dataset.py --with-audio`) and checks source counts, pairing, and shapes —
-catches an integration gap before a training run rather than after.
-
-## Honest status
-
-- The machinery runs: data → precompute → validate → train → save → load.
-- Whether the resulting LoRA actually tightens audio→video coupling **beyond the
-  base model's already-present native reactivity is not demonstrated.** Every
-  inference render so far is confounded (the base is already audio-reactive). The
-  companion repo's notes lay out the controlled eval that would settle it and why
-  the chosen synthetic task (beat→pulse) is a poor mechanism-prover.
-- If forking: the block-swap fit and the data-independence discipline are the
-  reusable parts. The open work is a clean eval, an audio-as-IC-reference node, and
-  probably a task the base model doesn't already do.
+- Machinery runs end to end: data -> precompute -> validate -> train (held-out + ref_gap) -> save -> load.
+- The reference visibly steers generation at default strength; **no controlled quantitative eval yet.**
+- The leading next lever is training-side: the target leaks the attribute, so the model has little
+  pressure to use the reference. Mask the target face region and/or bias timesteps toward high sigma to
+  force reliance, then re-eval with the swap protocol.
 
 ## Pointers (code)
 
-- `block_swap.py` — `attach_block_swap`, `StreamingBlockWrapper`, `strip_block_swap_prefix`
-- `synthetic_av.py` — the three `generate_dataset*` builders + clip renderers
-- `data_validation.py` / `scripts/verify_training_data.py` — pre-train validator
-- `configs/ltx2_audio_coupling_ic_lora.yaml` — the trained config (audio-only targets)
-- `trainer.py` — training loop (reads precomputed latents; no VAE in the loop)
+- `training_strategies/audio_reference.py` — the strategy; `block_swap.py` — the 4090 fit.
+- `metrics.py` (`ConvergenceMonitor`, `emit_if_fresh`, `paired_difference`), `lr_schedulers.py` (cosine + warmup),
+  trainer held-out/ref-gap/early-stop loop.
+- `scripts/reference_gap_by_sigma.py` — sigma-resolved ref-gap canary; `scripts/replay_metrics_to_wandb.py` — re-log metrics.jsonl.
+- `configs/ltx2_audio_reference.yaml` — example config.
 
-This is a fork of Lightricks' LTX-2 training code; these notes cover only the
-audio-IC-LoRA-specific additions.
+### Earlier work (superseded)
+
+The first audio-coupling experiments used procedural synthetic data (a shape pulsing on a click track,
+`synthetic_av.py`) and the `video_to_video` `audio_mode: condition` path, to test whether a LoRA could
+tighten audio->video coupling beyond the base model's native reactivity. That task was a poor
+mechanism-prover (the base is already audio-reactive) and the result was confounded; the audio-only
+in-context-reference work above replaced it.
+
+This is a fork of Lightricks' LTX-2 training code; these notes cover only the audio-IC-LoRA additions.
