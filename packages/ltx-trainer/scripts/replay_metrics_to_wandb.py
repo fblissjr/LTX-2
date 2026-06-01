@@ -9,7 +9,7 @@ live run.
 
 Usage:
   replay_metrics_to_wandb.py --metrics <run>/metrics.jsonl --run-name <name> \
-    [--project ltx2-celebvhq-identity] [--config <run>/training_config.yaml] [--dry-run]
+    [--project ltx2-audio-ic-lora] [--config <run>/training_config.yaml] [--dry-run]
 """
 
 from __future__ import annotations
@@ -48,7 +48,7 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="Replay metrics.jsonl into a fresh W&B run.")
     ap.add_argument("--metrics", required=True, help="path to a run's metrics.jsonl")
     ap.add_argument("--run-name", required=True, help="name for the replayed wandb run")
-    ap.add_argument("--project", default="ltx2-celebvhq-identity")
+    ap.add_argument("--project", default="ltx2-audio-ic-lora")
     ap.add_argument("--config", default=None, help="optional training_config.yaml to attach as wandb config")
     ap.add_argument("--dry-run", action="store_true", help="parse + summarize only; do NOT touch wandb")
     args = ap.parse_args()

@@ -126,7 +126,7 @@ validation:
   # precomputed set (unseen identities); a no-grad forward+loss + reference gap run every
   # holdout_interval optimization steps, logged to wandb + metrics.jsonl. Compare val/loss to
   # train/loss: train falling while val flattens/rises is overfitting.
-  holdout_data_root: null      # e.g. ".../celebvhq_identity/val" (same layout as preprocessed_data_root)
+  holdout_data_root: null      # e.g. ".../audio_context/val" (same layout as preprocessed_data_root)
   holdout_interval: 0          # 0 = off; e.g. 100 runs the held-out pass every 100 steps
   holdout_max_batches: 16      # cap batches per pass for a fast, low-variance signal (0 = whole set)
 
