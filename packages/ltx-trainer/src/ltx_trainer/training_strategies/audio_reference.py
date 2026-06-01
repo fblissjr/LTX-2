@@ -70,6 +70,20 @@ class AudioReferenceConfig(TrainingStrategyConfigBase):
         description="1.0 keeps the reference audio fully clean; <1.0 partially noises it.",
     )
 
+    reference_dropout_p: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Probability of DROPPING the reference on a training step (training the "
+            "unconditional, no-reference path: audio is target-only). 0.0 (default) always "
+            "includes the reference and does not perturb the RNG. >0 trains a well-defined "
+            "no-reference output so classifier-free guidance ON THE REFERENCE is well-behaved "
+            "at inference (pred = uncond + scale * (cond - uncond)) -- the knob that amplifies "
+            "an otherwise weakly-used reference."
+        ),
+    )
+
 
 class AudioReferenceStrategy(TrainingStrategy):
     """Audio-reference IC-LoRA: reference audio steers an AV target's audio attribute."""
@@ -167,48 +181,67 @@ class AudioReferenceStrategy(TrainingStrategy):
 
         # --- Audio: [target (noised) | reference (clean)] -----------------------
         target_audio = self._audio_patchifier.patchify(batch["audio_latents"]["latents"])
-        ref_audio = self._audio_patchifier.patchify(batch["reference_audio_latents"]["latents"])
         target_audio_len = target_audio.shape[1]
-        ref_audio_len = ref_audio.shape[1]
-
-        # Hold the reference clean by reference_strength (1.0 -> fully clean).
-        ref_keep = self.config.reference_strength
-        if ref_keep < 1.0:
-            ref_noise = torch.randn_like(ref_audio)
-            ref_audio = ref_keep * ref_audio + (1 - ref_keep) * ref_noise
 
         audio_noise = torch.randn_like(target_audio)
         noisy_target_audio = (1 - sigmas_expanded) * target_audio + sigmas_expanded * audio_noise
 
-        # Sequence: target leads (in the loss), reference trails (clean context).
-        audio_latent = torch.cat([noisy_target_audio, ref_audio], dim=1)
-        audio_targets = torch.cat([audio_noise - target_audio, torch.zeros_like(ref_audio)], dim=1)
-
-        # Conditioning mask: target = noised target (False), reference = clean (True).
-        audio_conditioning_mask = torch.zeros(
-            batch_size, target_audio_len + ref_audio_len, dtype=torch.bool, device=device
-        )
-        audio_conditioning_mask[:, target_audio_len:] = True
-        audio_loss_mask = ~audio_conditioning_mask
-
-        audio_timesteps = self._create_per_token_timesteps(audio_conditioning_mask, sigmas.squeeze())
-
         target_audio_positions = self._get_audio_positions(
             num_time_steps=target_audio_len, batch_size=batch_size, device=device, dtype=dtype
         )
-        # Reference at distinct, strictly-negative positions so the model reads it as
-        # out-of-timeline context. This MUST match the inference convention exactly
-        # (ltx_pipelines.lipdub.patchify_lipdub_audio_reference_latent with
-        # negative_positions=True): shift by the reference's own end-bound plus a small
-        # 0.04 gap, so the reference ends just below the target timeline's 0. RoPE is
-        # absolute — a different train-time offset would give the LoRA a reference<->target
-        # geometry it never sees at generation time.
-        ref_audio_positions = self._get_audio_positions(
-            num_time_steps=ref_audio_len, batch_size=batch_size, device=device, dtype=dtype
+
+        # Reference dropout: with probability reference_dropout_p train the UNCONDITIONAL
+        # (no-reference) path -- audio is target-only -- so the model has a well-defined output
+        # WITHOUT a reference, which is what makes classifier-free guidance on the reference
+        # well-behaved at inference (the guider extrapolates the with-reference vs no-reference
+        # forwards). The draw is once per batch (uniform across samples, so the sequence length
+        # stays collatable for batch > 1). p == 0.0 short-circuits before the RNG, so existing
+        # runs are bit-identical.
+        drop_reference = self.config.reference_dropout_p > 0.0 and (
+            float(torch.rand(1).item()) < self.config.reference_dropout_p
         )
-        aud_dur = ref_audio_positions[:, :, -1, 1].max()
-        ref_audio_positions = ref_audio_positions - aud_dur - 0.04
-        audio_positions = torch.cat([target_audio_positions, ref_audio_positions], dim=2)
+
+        if drop_reference:
+            audio_latent = noisy_target_audio
+            audio_targets = audio_noise - target_audio
+            audio_conditioning_mask = torch.zeros(batch_size, target_audio_len, dtype=torch.bool, device=device)
+            audio_positions = target_audio_positions
+        else:
+            ref_audio = self._audio_patchifier.patchify(batch["reference_audio_latents"]["latents"])
+            ref_audio_len = ref_audio.shape[1]
+
+            # Hold the reference clean by reference_strength (1.0 -> fully clean).
+            ref_keep = self.config.reference_strength
+            if ref_keep < 1.0:
+                ref_noise = torch.randn_like(ref_audio)
+                ref_audio = ref_keep * ref_audio + (1 - ref_keep) * ref_noise
+
+            # Sequence: target leads (in the loss), reference trails (clean context).
+            audio_latent = torch.cat([noisy_target_audio, ref_audio], dim=1)
+            audio_targets = torch.cat([audio_noise - target_audio, torch.zeros_like(ref_audio)], dim=1)
+
+            # Conditioning mask: target = noised target (False), reference = clean (True).
+            audio_conditioning_mask = torch.zeros(
+                batch_size, target_audio_len + ref_audio_len, dtype=torch.bool, device=device
+            )
+            audio_conditioning_mask[:, target_audio_len:] = True
+
+            # Reference at distinct, strictly-negative positions so the model reads it as
+            # out-of-timeline context. This MUST match the inference convention exactly
+            # (ltx_pipelines.lipdub.patchify_lipdub_audio_reference_latent with
+            # negative_positions=True): shift by the reference's own end-bound plus a small
+            # 0.04 gap, so the reference ends just below the target timeline's 0. RoPE is
+            # absolute — a different train-time offset would give the LoRA a reference<->target
+            # geometry it never sees at generation time.
+            ref_audio_positions = self._get_audio_positions(
+                num_time_steps=ref_audio_len, batch_size=batch_size, device=device, dtype=dtype
+            )
+            aud_dur = ref_audio_positions[:, :, -1, 1].max()
+            ref_audio_positions = ref_audio_positions - aud_dur - 0.04
+            audio_positions = torch.cat([target_audio_positions, ref_audio_positions], dim=2)
+
+        audio_loss_mask = ~audio_conditioning_mask
+        audio_timesteps = self._create_per_token_timesteps(audio_conditioning_mask, sigmas.squeeze())
 
         audio_modality = Modality(
             enabled=True,

@@ -144,3 +144,39 @@ def test_missing_reference_audio_raises():
     del batch["reference_audio_latents"]
     with pytest.raises((KeyError, ValueError)):
         strat.prepare_training_inputs(batch, FixedSigmaSampler())
+
+
+# --- reference dropout (trains the unconditional path for CFG-on-reference) ----
+
+
+def test_reference_dropout_defaults_to_zero():
+    assert AudioReferenceConfig().reference_dropout_p == 0.0
+
+
+def test_reference_dropout_zero_always_appends_reference():
+    strat = _strategy(first_frame_conditioning_p=0.0, reference_dropout_p=0.0)
+    out = strat.prepare_training_inputs(make_batch(audio_t=20, ref_audio_t=12), FixedSigmaSampler(0.5))
+    assert out.audio.latent.shape[1] == 20 + 12              # target + reference
+    assert out.audio.positions[:, 0, 20:, 1].max() < 0       # reference at negative positions
+
+
+def test_reference_dropout_one_drops_reference_unconditional():
+    # p=1.0 -> the no-reference (unconditional) path: audio is target-only, all in the loss,
+    # no negative reference positions. This is the branch CFG-on-reference extrapolates from.
+    strat = _strategy(first_frame_conditioning_p=0.0, reference_dropout_p=1.0)
+    out = strat.prepare_training_inputs(make_batch(audio_t=20, ref_audio_t=12), FixedSigmaSampler(0.5))
+    assert out.audio.latent.shape[1] == 20                   # target only, reference dropped
+    assert out.audio_loss_mask.shape[1] == 20
+    assert out.audio_loss_mask.all()                         # all target tokens stay in the loss
+    assert out.audio_targets.shape[1] == 20
+    assert (out.audio.positions[:, 0, :, 1] >= 0).all()      # no negative reference positions
+
+
+def test_reference_dropout_is_stochastic():
+    strat = _strategy(first_frame_conditioning_p=0.0, reference_dropout_p=0.5)
+    torch.manual_seed(0)
+    seqlens = {
+        strat.prepare_training_inputs(make_batch(audio_t=20, ref_audio_t=12), FixedSigmaSampler(0.5)).audio.latent.shape[1]
+        for _ in range(40)
+    }
+    assert seqlens == {20, 32}   # both the dropped (20) and the kept (20+12) paths occur
