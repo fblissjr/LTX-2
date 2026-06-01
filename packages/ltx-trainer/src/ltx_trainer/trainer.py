@@ -436,7 +436,14 @@ class LtxvTrainer:
                     # Cross-process val-guided early stop: the main rank set the trigger when the
                     # convergence monitor reported should_stop; all ranks observe it here and break
                     # together so the post-loop checkpoint + stats still run. No-op unless opted in.
-                    if is_optimization_step and self._accelerator.check_trigger():
+                    # Only poll the cross-process trigger when early stop is opted in: check_trigger()
+                    # does a reduce + .item() (a device sync) every optimization step, so gating it on
+                    # the flag keeps that sync off the default (no-early-stop) path entirely.
+                    if (
+                        cfg.optimization.early_stop_on_convergence
+                        and is_optimization_step
+                        and self._accelerator.check_trigger()
+                    ):
                         logger.info(f"Early stop: convergence trigger observed at step {self._global_step}.")
                         break
 
