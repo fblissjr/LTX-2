@@ -37,6 +37,17 @@ from ltx_trainer.training_strategies.base_strategy import (
     TrainingStrategyConfigBase,
 )
 
+# RoPE gap between the reference's end-bound and the target timeline's 0. The reference
+# is shifted to strictly-negative positions ending exactly -REFERENCE_ROPE_GAP, so the
+# model reads it as out-of-timeline context. This MUST match the inference convention
+# (ltx_pipelines.lipdub.patchify_lipdub_audio_reference_latent with negative_positions=True,
+# which subtracts ``aud_dur + 0.04``) — a different train-time offset gives the LoRA a
+# reference<->target geometry it never sees at generation time. We mirror the value rather
+# than import that function: ltx-pipelines is not a trainer runtime dependency, and its
+# lipdub module is not importable here anyway (it pulls an absent ``multigpu`` submodule).
+# The mirror is pinned by test_reference_positions_match_inference_negative_convention.
+REFERENCE_ROPE_GAP = 0.04
+
 
 class AudioReferenceConfig(TrainingStrategyConfigBase):
     """Configuration for the audio-reference IC-LoRA training strategy."""
@@ -237,7 +248,7 @@ class AudioReferenceStrategy(TrainingStrategy):
                 num_time_steps=ref_audio_len, batch_size=batch_size, device=device, dtype=dtype
             )
             aud_dur = ref_audio_positions[:, :, -1, 1].max()
-            ref_audio_positions = ref_audio_positions - aud_dur - 0.04
+            ref_audio_positions = ref_audio_positions - aud_dur - REFERENCE_ROPE_GAP
             audio_positions = torch.cat([target_audio_positions, ref_audio_positions], dim=2)
 
         audio_loss_mask = ~audio_conditioning_mask
