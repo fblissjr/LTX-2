@@ -43,9 +43,13 @@ from ltx_trainer.training_strategies.base_strategy import (
 # (ltx_pipelines.lipdub.patchify_lipdub_audio_reference_latent with negative_positions=True,
 # which subtracts ``aud_dur + 0.04``) — a different train-time offset gives the LoRA a
 # reference<->target geometry it never sees at generation time. We mirror the value rather
-# than import that function: ltx-pipelines is not a trainer runtime dependency, and its
-# lipdub module is not importable here anyway (it pulls an absent ``multigpu`` submodule).
-# The mirror is pinned by test_reference_positions_match_inference_negative_convention.
+# than import that function: ltx-pipelines is not a trainer runtime dependency (only ltx-core
+# is), so the trainer must not import from it at runtime. The mirror is pinned two ways:
+# test_reference_positions_match_inference_negative_convention locks it to the literal 0.04,
+# and test_reference_positions_match_upstream_lipdub_function imports the REAL inference
+# function (available because the workspace co-installs ltx-pipelines) and asserts byte-equal
+# positions — so an upstream sync that changes lipdub's gap or offset formula breaks the test
+# instead of silently desyncing generation.
 REFERENCE_ROPE_GAP = 0.04
 
 

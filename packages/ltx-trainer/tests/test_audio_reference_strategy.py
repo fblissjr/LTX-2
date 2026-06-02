@@ -120,6 +120,48 @@ def test_reference_negative_offset_holds_across_lengths():
         assert ref_time.max().item() == pytest.approx(-REFERENCE_ROPE_GAP), f"ref_t={ref_t}: end-bound drifted"
 
 
+def test_reference_positions_match_upstream_lipdub_function():
+    """CROSS-PARITY against the REAL inference code, not a mirrored literal.
+
+    The two tests above lock the trainer's offset to the literal ``0.04`` — but ``0.04`` is
+    duplicated from ``ltx_pipelines.lipdub.patchify_lipdub_audio_reference_latent`` by hand
+    (the trainer mirrors the value rather than importing it; see ``REFERENCE_ROPE_GAP``'s
+    docstring). A literal lock can't notice if an upstream sync changes lipdub's gap or its
+    offset formula: the mirror silently desyncs and generation degrades with no test failure.
+
+    This test closes that gap by importing the actual inference function and feeding it the
+    SAME reference latent the strategy consumed, then asserting byte-equal RoPE positions.
+    Both paths wrap the same ltx-core primitive (``AudioPatchifier.get_patch_grid_bounds``),
+    so the ONLY thing that can differ is the negative-offset convention — exactly the
+    train<->inference contract we need locked. If upstream drifts, this breaks; the literal
+    tests above then tell us which side moved.
+
+    ``importorskip`` because ltx-pipelines is a co-installed workspace sibling, not a trainer
+    dependency (see ``REFERENCE_ROPE_GAP``) — present in a workspace checkout / CI, absent in a
+    standalone trainer install, where the parity simply can't be checked.
+    """
+    lipdub = pytest.importorskip("ltx_pipelines.lipdub")
+
+    strat = _strategy(first_frame_conditioning_p=0.0)
+    audio_t, ref_audio_t = 20, 12
+    batch = make_batch(audio_t=audio_t, ref_audio_t=ref_audio_t)
+    out = strat.prepare_training_inputs(batch, FixedSigmaSampler())
+    trainer_ref_positions = out.audio.positions[:, :, audio_t:, :]  # [B, 1, T_ref, 2]
+
+    # Feed the inference function the very latent the strategy just used as its reference.
+    ref_latents = batch["reference_audio_latents"]["latents"]
+    _, upstream_positions = lipdub.patchify_lipdub_audio_reference_latent(
+        ref_latents, negative_positions=True, device=torch.device("cpu")
+    )
+
+    assert trainer_ref_positions.shape == upstream_positions.shape
+    assert torch.equal(trainer_ref_positions, upstream_positions), (
+        "Trainer reference RoPE positions diverged from "
+        "ltx_pipelines.lipdub.patchify_lipdub_audio_reference_latent — train/inference offset "
+        "desync. Reconcile REFERENCE_ROPE_GAP / the offset formula with upstream lipdub."
+    )
+
+
 # --- the AV target: video is generated, in the loss ---------------------------
 
 
