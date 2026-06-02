@@ -22,6 +22,7 @@ import torch
 from _audio_reference_helpers import FixedSigmaSampler, make_batch
 
 from ltx_trainer.training_strategies.audio_reference import (
+    REFERENCE_ROPE_GAP,
     AudioReferenceConfig,
     AudioReferenceStrategy,
 )
@@ -95,8 +96,28 @@ def test_reference_positions_match_inference_negative_convention():
     assert positions.shape[2] == 20 + 12
     ref_time = positions[:, 0, 20:, :]
     assert (ref_time < 0).all()  # entirely out of the target timeline
-    # Ends just below 0 (the 0.04 gap), not an arbitrary large offset.
-    assert -0.5 < ref_time.max().item() < 0
+    # Pin the LITERAL gap, not the REFERENCE_ROPE_GAP constant: asserting against the
+    # constant would be tautological (the computed offset IS -constant), so it would pass
+    # for any value. The literal locks the actual train<->inference contract — inference
+    # subtracts the same 0.04 gap, so any drift in the constant breaks generation AND
+    # these assertions. The first line ties the constant to the literal the mirror requires.
+    assert REFERENCE_ROPE_GAP == 0.04
+    assert ref_time.max().item() == pytest.approx(-0.04)
+
+
+def test_reference_negative_offset_holds_across_lengths():
+    """The offset is computed from the reference's OWN length, so a shorter or longer reference
+    must STILL end exactly -REFERENCE_ROPE_GAP below 0. This is the invariant the inference-side
+    reference-window / multi-slice feature relies on: trimming changes the ref token count but must
+    not change the train<->inference geometry. Locks it across lengths, not just the fixed case above."""
+    strat = _strategy(first_frame_conditioning_p=0.0)
+    for ref_t in (4, 12, 30, 60):
+        out = strat.prepare_training_inputs(make_batch(audio_t=20, ref_audio_t=ref_t), FixedSigmaSampler())
+        positions = out.audio.positions
+        assert positions.shape[2] == 20 + ref_t, f"ref_t={ref_t}: wrong seq length"
+        ref_time = positions[:, 0, 20:, :]
+        assert (ref_time < 0).all(), f"ref_t={ref_t}: reference not entirely negative"
+        assert ref_time.max().item() == pytest.approx(-REFERENCE_ROPE_GAP), f"ref_t={ref_t}: end-bound drifted"
 
 
 # --- the AV target: video is generated, in the loss ---------------------------
