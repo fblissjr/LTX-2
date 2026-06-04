@@ -26,7 +26,7 @@ def test_load_tolerates_python_tuple_tag_from_historical_dumps(tmp_path):
     p.write_text("validation:\n  video_dims: !!python/tuple\n  - 512\n  - 512\n  - 121\nseed: 42\n")
     cfg = load_config_yaml(p)
     assert cfg["seed"] == 42
-    assert list(cfg["validation"]["video_dims"]) == [512, 512, 121]
+    assert cfg["validation"]["video_dims"] == (512, 512, 121)  # the tag constructs an actual tuple
 
 
 def test_load_rejects_arbitrary_python_object_tags(tmp_path):
