@@ -1,4 +1,4 @@
-Last updated: 2026-06-01
+Last updated: 2026-06-04
 
 # Audio-only IC-LoRA — trainer-side notes (experimental)
 
@@ -42,9 +42,10 @@ locked by a test.
 **Two cuts (the only difference between the two released checkpoints), set by `lora.target_modules`:**
 - **audio-only:** `audio_attn1/2`, `audio_ff`. The reference shapes the generated audio; the video
   follows via the frozen base coupling (subtler video effect, smallest footprint on the base).
+  Example config: `configs/ltx2_audio_reference.yaml` (this is the cut it ships).
 - **cross-modal:** the above **plus** `audio_to_video_attn` / `video_to_audio_attn`. The bridge is the
   only path the audio reference reaches the video stream, so adapting it couples the reference into the
-  video more strongly. Example config: `configs/ltx2_audio_reference.yaml`.
+  video more strongly (extend the example config's `target_modules` with the bridge modules).
 
 (There is also an older `video_to_video` `audio_mode: condition` path for coupling experiments; the
 audio-only-reference work above supersedes it for this task.)
