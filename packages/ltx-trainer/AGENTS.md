@@ -63,6 +63,8 @@ packages/ltx-trainer/
 │   ├── caption_videos.py         # Automatic video captioning
 │   ├── decode_latents.py         # Latent decoding for debugging
 │   ├── inference.py              # Inference with trained models
+│   ├── render_eval_sweep.py      # Scripted audio-eval sweeps (refs x seeds, manifest.jsonl)
+│   ├── reference_gap_by_sigma.py # Sigma-resolved ref-gap curve (CIs + raw per-pair gaps)
 │   ├── compute_reference.py      # Generate IC-LoRA reference videos
 │   └── split_scenes.py           # Scene detection and splitting
 ├── configs/                      # Example training configurations
