@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import zlib
 from pathlib import Path
 
 import torch
@@ -28,6 +29,7 @@ import torchaudio
 from ltx_trainer import logger
 from ltx_trainer.model_loader import load_audio_vae_encoder
 from ltx_trainer.reference_audio import (
+    augment_reference_waveform,
     build_audio_processor,
     encode_reference_waveform,
     reference_output_path,
@@ -48,6 +50,19 @@ def main() -> None:
     ap.add_argument("--reference-key", default="reference", help="Manifest field with the reference WAV path")
     ap.add_argument("--device", default="cuda", help="Device for the audio VAE encoder")
     ap.add_argument("--overwrite", action="store_true", help="Re-encode even if the output .pt already exists")
+    ap.add_argument(
+        "--channel-aug-variants",
+        type=int,
+        default=0,
+        help=(
+            "K > 0 writes a [K, C, T, F] variant stack per reference (variants key included; "
+            "PrecomputedDataset picks one at random per load): variant 0 is the clean encode, "
+            "variants 1..K-1 are channel-augmented (gain jitter / peaking EQ / light noise) so "
+            "session-channel fingerprints can't become the learned shortcut. 0 (default) keeps "
+            "the plain single-latent output."
+        ),
+    )
+    ap.add_argument("--seed", type=int, default=0, help="Base seed for channel augmentation (per-file derived)")
     args = ap.parse_args()
 
     device = torch.device(args.device)
@@ -73,8 +88,21 @@ def main() -> None:
         waveform, sample_rate = torchaudio.load(str(ref_path))
 
         with torch.inference_mode():
-            out = encode_reference_waveform(encoder, processor, waveform, sample_rate)
-        out["latents"] = out["latents"].cpu().contiguous()
+            if args.channel_aug_variants > 0:
+                # Variant 0 = clean; 1..K-1 = channel-augmented. Per-file seed derived from
+                # the output's relative path (stable across manifest reorderings and re-runs).
+                file_seed = args.seed + zlib.crc32(str(dst.name).encode())
+                variants = [waveform]
+                for k in range(1, args.channel_aug_variants):
+                    gen = torch.Generator().manual_seed(file_seed + k)
+                    variants.append(augment_reference_waveform(waveform, sample_rate, generator=gen))
+                encoded = [encode_reference_waveform(encoder, processor, w, sample_rate) for w in variants]
+                out = encoded[0]
+                out["latents"] = torch.stack([e["latents"].cpu().contiguous() for e in encoded])
+                out["variants"] = len(encoded)
+            else:
+                out = encode_reference_waveform(encoder, processor, waveform, sample_rate)
+                out["latents"] = out["latents"].cpu().contiguous()
 
         dst.parent.mkdir(parents=True, exist_ok=True)
         torch.save(out, dst)

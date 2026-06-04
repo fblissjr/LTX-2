@@ -79,3 +79,40 @@ def test_encode_reference_waveform_format_matches_audio_latents():
     assert out["num_time_steps"] == 50
     assert out["frequency_bins"] == 16
     assert abs(out["duration"] - 2.0) < 1e-6
+
+
+# --- channel augmentation (the anti-shortcut for session fingerprints) ----------
+
+
+def _aug(waveform, seed: int):
+    from ltx_trainer.reference_audio import augment_reference_waveform
+
+    gen = torch.Generator().manual_seed(seed)
+    return augment_reference_waveform(waveform, 16000, generator=gen)
+
+
+def test_channel_aug_preserves_shape_and_stays_finite():
+    wav = torch.randn(1, 16000) * 0.1
+    out = _aug(wav, seed=0)
+    assert out.shape == wav.shape
+    assert torch.isfinite(out).all()
+    # bounded: EQ/gain jitter must not explode the signal
+    assert out.abs().max() < wav.abs().max() * 4 + 1e-3
+
+
+def test_channel_aug_is_deterministic_per_seed_and_varies_across_seeds():
+    """Re-running a precompute must reproduce byte-identical variants (the eval and the
+    training data must not drift between runs), while different variant seeds must produce
+    genuinely different channel renditions (otherwise the K-stack is K copies and the
+    anti-shortcut does nothing)."""
+    wav = torch.randn(2, 16000) * 0.1
+    a1, a2 = _aug(wav, seed=7), _aug(wav, seed=7)
+    assert torch.equal(a1, a2)
+    b = _aug(wav, seed=8)
+    assert not torch.equal(a1, b)
+
+
+def test_channel_aug_actually_changes_the_signal():
+    wav = torch.randn(1, 16000) * 0.1
+    out = _aug(wav, seed=0)
+    assert not torch.allclose(out, wav, atol=1e-4)

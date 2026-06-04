@@ -76,6 +76,47 @@ def ensure_audio_channels(waveform: torch.Tensor, want: int) -> torch.Tensor:
     return waveform.repeat_interleave(reps, dim=-2)[..., :want, :]
 
 
+def augment_reference_waveform(
+    waveform: torch.Tensor,
+    sampling_rate: int,
+    *,
+    generator: torch.Generator,
+) -> torch.Tensor:
+    """Random channel augmentation for a reference waveform (the anti-shortcut transform).
+
+    Reference/target pairs cut from the same recording session share channel fingerprints
+    beyond the voice — room tone, mic response, level. An IC-LoRA reads the controlled
+    attribute from whichever channel co-varies with it at lowest cost, so a constant session
+    fingerprint is a learnable shortcut ("match the room, not the voice"). Randomizing the
+    reference's channel per variant (gain jitter, peaking EQ, light noise) makes those
+    nuisance factors unreliable while leaving the voice attribute intact — ST-DRC's
+    reference-augmentation recipe applied to audio.
+
+    Deterministic given ``generator`` (re-running a precompute reproduces byte-identical
+    variants). Waveform is ``[channels, samples]`` (or batched); shape is preserved.
+    """
+    import torchaudio.functional as taf
+
+    def _unif(lo: float, hi: float) -> float:
+        return lo + (hi - lo) * torch.rand(1, generator=generator).item()
+
+    out = waveform
+    # Gain jitter +-4 dB (level is the cheapest session fingerprint).
+    out = taf.gain(out, gain_db=_unif(-4.0, 4.0))
+    # 1-2 random peaking-EQ bands (mic/room coloration), center log-uniform 200 Hz - 6 kHz,
+    # clamped below Nyquist for short sample rates.
+    n_bands = 1 + int(torch.rand(1, generator=generator).item() < 0.5)
+    for _ in range(n_bands):
+        center = 10.0 ** _unif(2.301, 3.778)  # ~200 .. ~6000 Hz
+        center = min(center, sampling_rate / 2 * 0.9)
+        out = taf.equalizer_biquad(out, sampling_rate, center_freq=center, gain=_unif(-6.0, 6.0), Q=_unif(0.7, 2.0))
+    # Light broadband noise at -45 .. -35 dB relative to signal RMS (ambience floor).
+    rms = out.pow(2).mean().sqrt().clamp_min(1e-8)
+    noise_level = rms * (10.0 ** (_unif(-45.0, -35.0) / 20.0))
+    out = out + torch.randn(out.shape, generator=generator, dtype=out.dtype) * noise_level
+    return out
+
+
 def encode_reference_waveform(
     encoder: torch.nn.Module,
     processor: Any,

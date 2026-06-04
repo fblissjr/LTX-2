@@ -164,10 +164,18 @@ output_dir: "outputs/ltx2_audio_reference"
 #                                # ~1 in 9 pairs is literally the adjacent segment of one take.
 #   speaker_grouping: verified   # group by a verified speaker id (voice-embedding cluster, or the
 #                                # source release's speaker-cluster column) instead of filename prefix.
-#   reference_channel_aug: true  # EQ / reverb / codec / loudness-normalize the reference so
-#                                # session-channel fingerprints can't be the learned shortcut.
+#   (reference channel-aug: IMPLEMENTED as a precompute flag, not a config key — run
+#    scripts/precompute_reference_audio.py with --channel-aug-variants K to write K-stacks
+#    where variant 0 is clean and 1..K-1 are gain/EQ/noise-augmented; PrecomputedDataset
+#    already picks one variant at random per load.)
 #   target_face_mask: true       # mask the target face region during training (the target-leak fix).
+
+# --- IMPLEMENTED next-round lever (uncomment to use): soft high-sigma bias ----------------
+# At low sigma the noised target still carries the controlled attribute (the leak), so the
+# model has little pressure to read the reference. The mixture keeps low-sigma coverage
+# (the LoRA applies at every sigma at inference) while weighting training toward the band
+# where the reference must do the work.
 #
 # flow_matching:
-#   timestep_sampling_params: { high_sigma_bias: ... }  # bias toward high noise, where the target
-#                                # is least visible and the reference has to do the work.
+#   timestep_sampling_mode: high_sigma_mixture
+#   timestep_sampling_params: { band_min: 0.6, band_prob: 0.5 }
