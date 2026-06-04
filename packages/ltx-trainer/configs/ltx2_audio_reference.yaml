@@ -152,3 +152,22 @@ wandb:
 
 seed: 42
 output_dir: "outputs/ltx2_audio_reference"
+
+# --- next-round dataset/training ideas (documented here so the next run starts from them;
+# --- NONE of these keys are implemented in code yet -- they are commented intent, not config) ---
+#
+# data:
+#   pairing: cross_session       # pair reference/target across DIFFERENT source videos of the same
+#                                # (verified) speaker. The current build groups by filename prefix,
+#                                # so every pair is two windows of ONE source video and shares the
+#                                # whole recording session (room tone, mic, scene) beyond the voice;
+#                                # ~1 in 9 pairs is literally the adjacent segment of one take.
+#   speaker_grouping: verified   # group by a verified speaker id (voice-embedding cluster, or the
+#                                # source release's speaker-cluster column) instead of filename prefix.
+#   reference_channel_aug: true  # EQ / reverb / codec / loudness-normalize the reference so
+#                                # session-channel fingerprints can't be the learned shortcut.
+#   target_face_mask: true       # mask the target face region during training (the target-leak fix).
+#
+# flow_matching:
+#   timestep_sampling_params: { high_sigma_bias: ... }  # bias toward high noise, where the target
+#                                # is least visible and the reference has to do the work.
