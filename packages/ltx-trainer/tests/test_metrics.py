@@ -10,6 +10,9 @@ synthetic curves and assert the flags fire correctly.
 from __future__ import annotations
 
 import json
+import math
+
+import pytest
 
 from ltx_trainer.metrics import (
     EMA,
@@ -18,6 +21,7 @@ from ltx_trainer.metrics import (
     build_metrics_row,
     emit_if_fresh,
     paired_difference,
+    summarize_gaps,
 )
 
 
@@ -203,3 +207,42 @@ def test_paired_difference_with_torch_rng():
         measure, 1.0, 3.0, save_state=torch.get_rng_state, restore_state=torch.set_rng_state
     )
     assert abs(gap - 2.0) < 1e-6  # identical noise cancels; gap = pure input difference
+
+
+# --- summarize_gaps (per-sigma gap aggregation with a noise yardstick) ----------
+
+
+def test_summarize_gaps_known_values():
+    """Mean/std/CI on a hand-checkable input. The CI is the whole point: the 2026-06
+    identity runs emitted bare means (n=23, magnitudes ~1% of loss) that could not be
+    distinguished from noise after the fact -- summarize_gaps makes every future curve
+    carry its own yardstick."""
+    s = summarize_gaps([1.0, 2.0, 3.0])
+    assert s["n"] == 3
+    assert s["mean"] == pytest.approx(2.0)
+    assert s["std"] == pytest.approx(1.0)  # sample std
+    half = 1.96 * 1.0 / math.sqrt(3)
+    assert s["ci95_lo"] == pytest.approx(2.0 - half)
+    assert s["ci95_hi"] == pytest.approx(2.0 + half)
+
+
+def test_summarize_gaps_ci_separates_signal_from_zero():
+    # Tight positive data -> the interval excludes 0 (a "real" gap); the same mean with
+    # huge spread must not.
+    tight = summarize_gaps([0.010, 0.011, 0.009, 0.010, 0.012, 0.008])
+    assert tight["ci95_lo"] > 0.0
+    wide = summarize_gaps([0.010, -0.5, 0.55, -0.4, 0.45, -0.05])
+    assert wide["ci95_lo"] < 0.0 < wide["ci95_hi"]
+
+
+def test_summarize_gaps_degenerate_inputs():
+    # Empty: everything NaN, n=0 (mirrors the script's float("nan") rows). One sample:
+    # the mean is real but spread is undefined -- NaN, not 0, so a single-batch run can't
+    # masquerade as a tight measurement.
+    empty = summarize_gaps([])
+    assert empty["n"] == 0
+    assert all(math.isnan(empty[k]) for k in ("mean", "std", "ci95_lo", "ci95_hi"))
+    one = summarize_gaps([5.0])
+    assert one["n"] == 1
+    assert one["mean"] == pytest.approx(5.0)
+    assert all(math.isnan(one[k]) for k in ("std", "ci95_lo", "ci95_hi"))

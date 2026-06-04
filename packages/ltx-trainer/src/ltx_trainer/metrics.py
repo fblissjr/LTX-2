@@ -12,8 +12,9 @@ without a GPU; the trainer feeds it scalars each eval/log step.
 from __future__ import annotations
 
 import json
+import math
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -201,6 +202,31 @@ def paired_difference(
     restore_state(state)
     mb = measure(b)
     return mb - ma
+
+
+def summarize_gaps(gaps: "Sequence[float]") -> dict[str, float | int]:
+    """Mean + spread for a set of per-pair reference-attribution gaps.
+
+    The 2026-06 identity runs emitted bare per-sigma means (n≈23, magnitudes ~1% of the
+    loss) that later could not be distinguished from noise — the curve sparked a real
+    "is the reference load-bearing?" debate that the data couldn't settle. This makes
+    every future curve carry its own yardstick: a normal-approximation 95% CI
+    (``mean ± 1.96·sd/√n``). n is small in practice, so treat the interval as a noise
+    yardstick ("is this gap distinguishable from 0?"), not exact inference.
+
+    Degenerate inputs return NaN rather than something fake: n=0 → all NaN; n=1 → mean
+    is real but std/CI are NaN (a single batch must not masquerade as a tight measurement).
+    """
+    n = len(gaps)
+    nan = float("nan")
+    if n == 0:
+        return {"mean": nan, "std": nan, "n": 0, "ci95_lo": nan, "ci95_hi": nan}
+    mean = sum(gaps) / n
+    if n == 1:
+        return {"mean": mean, "std": nan, "n": 1, "ci95_lo": nan, "ci95_hi": nan}
+    std = math.sqrt(sum((g - mean) ** 2 for g in gaps) / (n - 1))  # sample std
+    half = 1.96 * std / math.sqrt(n)
+    return {"mean": mean, "std": std, "n": n, "ci95_lo": mean - half, "ci95_hi": mean + half}
 
 
 def build_metrics_row(
