@@ -31,6 +31,7 @@ from ltx_core.model.video_vae import SpatialTilingConfig, TemporalTilingConfig, 
 from ltx_core.tools import AudioLatentTools, VideoLatentTools
 from ltx_core.types import AudioLatentShape, LatentState, SpatioTemporalScaleFactors, VideoLatentShape, VideoPixelShape
 from ltx_trainer.progress import SamplingContext
+from ltx_trainer.training_strategies.audio_reference import REFERENCE_ROPE_GAP
 
 if TYPE_CHECKING:
     from ltx_core.model.audio_vae import AudioDecoder, Vocoder
@@ -40,6 +41,94 @@ if TYPE_CHECKING:
     from ltx_core.text_encoders.gemma.embeddings_processor import EmbeddingsProcessor
 
 VIDEO_SCALE_FACTORS = SpatioTemporalScaleFactors.default()
+
+# Audio latent layout constants (match AudioLatentShape / the AV precompute format).
+_AUDIO_CHANNELS = 8
+_AUDIO_MEL_BINS = 16
+
+
+def _patchify_audio_vae_latents(audio_latents: Tensor, patchifier: AudioPatchifier, like: Tensor) -> Tensor:
+    """Audio-VAE latents ``[C, T, F]`` or ``[B, C, T, F]`` -> patchified tokens ``[B, T, C*F]``
+    on ``like``'s device/dtype. The unpatchified form is what the precompute writes
+    (``audio_latents``/``reference_audio_latents`` ``.pt`` files), so eval callers can feed
+    those files straight in."""
+    if audio_latents.dim() == 3:
+        audio_latents = audio_latents.unsqueeze(0)
+    return patchifier.patchify(audio_latents).to(device=like.device, dtype=like.dtype)
+
+
+def apply_input_audio_conditioning(
+    state: LatentState, audio_latents: Tensor, patchifier: AudioPatchifier
+) -> LatentState:
+    """Freeze the WHOLE audio stream to a real clip's latents (clean conditioning).
+
+    The in-place twin of ``_apply_image_conditioning``: write the clip into
+    ``latent``/``clean_latent`` and zero the ``denoise_mask`` so the noiser skips it and the
+    denoise loop pins it (``timesteps = sigma * mask`` -> 0 = clean; the per-step clean-state
+    re-imposition holds it). This is the audio->video coupling eval shape — the audio is the
+    stimulus, only the video is generated. Positions are untouched: the clip occupies the
+    target timeline, not out-of-timeline context (for that, see
+    ``extend_audio_state_with_reference``).
+    """
+    tokens = _patchify_audio_vae_latents(audio_latents, patchifier, state.latent)
+    if tokens.shape[1] != state.latent.shape[1]:
+        raise ValueError(
+            f"input_audio_latents has {tokens.shape[1]} audio tokens but the generation is sized "
+            f"for {state.latent.shape[1]} (audio length derives from num_frames / frame_rate) — "
+            "trim or pad the clip to the generation duration."
+        )
+    return LatentState(
+        latent=tokens.clone(),
+        denoise_mask=torch.zeros_like(state.denoise_mask),
+        positions=state.positions,
+        clean_latent=tokens.clone(),
+    )
+
+
+def extend_audio_state_with_reference(
+    state: LatentState, reference_audio_latents: Tensor, patchifier: AudioPatchifier
+) -> tuple[LatentState, int]:
+    """Append an in-context reference to the audio state: ``[target | ref]`` at NEGATIVE RoPE.
+
+    The sampler twin of ``AudioReferenceStrategy.prepare_training_inputs``'s reference block
+    (and of the ComfyUI guide-node attach): reference tokens trail the target, held clean
+    (``denoise_mask`` 0), at strictly-negative positions ending ``-REFERENCE_ROPE_GAP`` below
+    the target timeline's 0 — the train/inference parity contract locked by the strategy's
+    cross-parity tests. Both modal streams stay GENERATED; the reference only steers.
+
+    Returns the extended state and ``ref_seq_len`` (pass to ``strip_audio_reference`` before
+    decode).
+    """
+    tokens = _patchify_audio_vae_latents(reference_audio_latents, patchifier, state.latent)
+    batch, ref_seq_len = tokens.shape[0], tokens.shape[1]
+
+    ref_positions = patchifier.get_patch_grid_bounds(
+        output_shape=AudioLatentShape(
+            batch=batch, channels=_AUDIO_CHANNELS, frames=ref_seq_len, mel_bins=_AUDIO_MEL_BINS
+        ),
+        device=state.latent.device,
+    ).to(torch.float32)
+    aud_dur = ref_positions[:, :, -1, 1].max()
+    ref_positions = ref_positions - aud_dur - REFERENCE_ROPE_GAP
+
+    ref_mask = torch.zeros(batch, ref_seq_len, 1, device=state.latent.device, dtype=state.denoise_mask.dtype)
+    extended = LatentState(
+        latent=torch.cat([state.latent, tokens], dim=1),
+        denoise_mask=torch.cat([state.denoise_mask, ref_mask], dim=1),
+        positions=torch.cat([state.positions, ref_positions.to(state.positions.dtype)], dim=2),
+        clean_latent=torch.cat([state.clean_latent, tokens], dim=1),
+    )
+    return extended, ref_seq_len
+
+
+def strip_audio_reference(state: LatentState, ref_seq_len: int) -> LatentState:
+    """Drop the trailing reference tokens before decode (they are context, not output)."""
+    return LatentState(
+        latent=state.latent[:, :-ref_seq_len],
+        denoise_mask=state.denoise_mask[:, :-ref_seq_len],
+        positions=state.positions[:, :, :-ref_seq_len],
+        clean_latent=state.clean_latent[:, :-ref_seq_len],
+    )
 
 
 @dataclass
@@ -88,6 +177,17 @@ class GenerationConfig:
     reference_video: Tensor | None = None  # For IC-LoRA: [F, C, H, W] in [0, 1]
     reference_downscale_factor: int = 1  # For IC-LoRA: downscale factor (1 = same resolution, 2 = half resolution)
     generate_audio: bool = True  # Whether to generate audio alongside video
+    # Audio-input eval lanes (scripted render path; mutually exclusive):
+    # - input_audio_latents: audio-VAE latents [C, T, F] (a precomputed audio_latents .pt) injected
+    #   as CLEAN conditioning — the whole audio stream is frozen to this clip and only the video is
+    #   generated (the audio->video coupling eval shape).
+    # - reference_audio_latents: audio-VAE latents [C, T, F] (a precomputed reference_audio_latents
+    #   .pt) appended as an in-context reference at NEGATIVE RoPE positions — both modalities stay
+    #   generated; the reference steers (the audio-reference IC-LoRA swap-eval shape). NOTE: when
+    #   trainer-side and ComfyUI renders disagree about a checkpoint ranking, the ComfyUI path is
+    #   the shipped regime and arbitrates.
+    input_audio_latents: Tensor | None = None
+    reference_audio_latents: Tensor | None = None
     include_reference_in_output: bool = False  # For IC-LoRA: concatenate original reference with generated output
     cached_embeddings: CachedPromptEmbeddings | None = None  # Pre-computed text embeddings (avoids loading Gemma)
     stg_scale: float = 0.0  # STG strength (0.0 = disabled, recommended: 1.0)
@@ -104,6 +204,25 @@ class GenerationConfig:
         elif self.tiled_decoding is False:
             # Explicitly disabled - use config with enabled=False
             object.__setattr__(self, "tiled_decoding", TiledDecodingConfig(enabled=False))
+
+    def validate_audio_inputs(self) -> None:
+        """Validate the audio-input eval fields (called from the sampler's _validate_config).
+
+        Mutually exclusive by design: a frozen clean stream plus an appended reference is an
+        untrained combination — neither the strategy nor the shipped inference path ever runs
+        it, so an eval under it would measure nothing real.
+        """
+        if self.input_audio_latents is not None and self.reference_audio_latents is not None:
+            raise ValueError(
+                "input_audio_latents and reference_audio_latents are mutually exclusive: "
+                "frozen-clean audio plus an in-context reference is a combination no training "
+                "or inference path runs."
+            )
+        if (self.input_audio_latents is not None or self.reference_audio_latents is not None) and not self.generate_audio:
+            raise ValueError(
+                "Audio-input eval fields require generate_audio=True (the audio modality must "
+                "exist to carry the conditioning/reference)."
+            )
 
 
 class ValidationSampler:
@@ -203,6 +322,19 @@ class ValidationSampler:
                 video_clean_state, config.condition_image, config, device
             )
 
+        # Audio-input eval lanes: freeze the stream to a real clip, or append an in-context
+        # reference at negative RoPE (mask=0 either way -> the noiser and the loop hold it clean).
+        audio_ref_seq_len = 0
+        if audio_clean_state is not None:
+            if config.input_audio_latents is not None:
+                audio_clean_state = apply_input_audio_conditioning(
+                    audio_clean_state, config.input_audio_latents, self._audio_patchifier
+                )
+            elif config.reference_audio_latents is not None:
+                audio_clean_state, audio_ref_seq_len = extend_audio_state_with_reference(
+                    audio_clean_state, config.reference_audio_latents, self._audio_patchifier
+                )
+
         # Add noise
         noiser = GaussianNoiser(generator=generator)
         video_state = noiser(latent_state=video_clean_state, noise_scale=1.0)
@@ -229,6 +361,8 @@ class ValidationSampler:
 
         audio_output = None
         if audio_state is not None and audio_tools is not None:
+            if audio_ref_seq_len:
+                audio_state = strip_audio_reference(audio_state, audio_ref_seq_len)
             audio_state = audio_tools.clear_conditioning(audio_state)
             audio_state = audio_tools.unpatchify(audio_state)
             audio_output = self._decode_audio(audio_state, device)
@@ -293,6 +427,18 @@ class ValidationSampler:
         audio_clean_state = (
             audio_tools.create_initial_state(device=device, dtype=torch.bfloat16) if audio_tools else None
         )
+        # Audio-input eval lanes — identical treatment to _generate_standard (this is the path
+        # that pairs an audio input WITH the IC-LoRA video reference).
+        audio_ref_seq_len = 0
+        if audio_clean_state is not None:
+            if config.input_audio_latents is not None:
+                audio_clean_state = apply_input_audio_conditioning(
+                    audio_clean_state, config.input_audio_latents, self._audio_patchifier
+                )
+            elif config.reference_audio_latents is not None:
+                audio_clean_state, audio_ref_seq_len = extend_audio_state_with_reference(
+                    audio_clean_state, config.reference_audio_latents, self._audio_patchifier
+                )
         audio_state = noiser(latent_state=audio_clean_state, noise_scale=1.0) if audio_clean_state else None
 
         # Run denoising loop
@@ -325,6 +471,8 @@ class ValidationSampler:
         # Decode audio
         audio_output = None
         if audio_state is not None and audio_tools is not None:
+            if audio_ref_seq_len:
+                audio_state = strip_audio_reference(audio_state, audio_ref_seq_len)
             audio_state = audio_tools.clear_conditioning(audio_state)
             audio_state = audio_tools.unpatchify(audio_state)
             audio_output = self._decode_audio(audio_state, device)
@@ -673,6 +821,7 @@ class ValidationSampler:
             raise ValueError(f"num_frames must satisfy num_frames % 8 == 1, got {config.num_frames}")
         if config.generate_audio and (self._audio_decoder is None or self._vocoder is None):
             raise ValueError("Audio generation requires audio_decoder and vocoder")
+        config.validate_audio_inputs()
         if config.condition_image is not None and self._vae_encoder is None:
             raise ValueError("Image conditioning requires vae_encoder")
         if config.reference_video is not None and self._vae_encoder is None:
