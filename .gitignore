@@ -56,3 +56,4 @@ tmp
 .claude/
 internal/
 coderef/
+wandb/
