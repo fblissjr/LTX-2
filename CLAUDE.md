@@ -1,6 +1,6 @@
 # LTX-2 fork — Claude instructions
 
-Last updated: 2026-05-30
+Last updated: 2026-06-04
 
 **This is a fork of Lightricks's LTX-2 trainer**, branch `audio-guidance-iclora-vtv`. Used by the parent `ComfyUI-AudioLoopHelper` repo (`../../`) for audio→video IC-LoRA training research. Parent project's CLAUDE.md (`../../CLAUDE.md`) covers the broader ComfyUI work; this file covers what's specific to working IN this fork.
 
@@ -43,11 +43,11 @@ Audio VAE decoder + vocoder are loaded only when **validation will actually gene
 
 The `audio_reference` strategy is the **transfer** paradigm: the in-context reference AUDIO is the *controller*, so the pairing is **different content, shared attribute, reference carries it, caption neutral**. The seesaw (don't re-litigate toward matched content): *matched content ⟺ the caption controls the attribute*; *the audio controls the attribute ⟺ unmatched content* — mutually exclusive. Matched-content is the OTHER (fixed-effect / cowboy-hat) paradigm where text is the controller.
 
-**Train/inference RoPE parity is load-bearing.** The reference is appended `[target | ref]` at NEGATIVE positions matching `ltx_pipelines.lipdub.patchify_lipdub_audio_reference_latent(negative_positions=True)` — shift by the reference's own end-bound + a `0.04` gap so it ends just below the target's 0. A different train-time offset silently degrades generation; locked by a test assertion.
+**Train/inference RoPE parity is load-bearing.** The reference is appended `[target | ref]` at NEGATIVE positions matching `ltx_pipelines.lipdub.patchify_lipdub_audio_reference_latent(negative_positions=True)` — shift by the reference's own end-bound + a `0.04` gap so it ends just below the target's 0. A different train-time offset silently degrades generation; locked two ways: literal-pin tests AND a cross-parity test that imports the real upstream `patchify_lipdub_audio_reference_latent` and asserts byte-equal positions (catches upstream drift the literal pin can't). The ComfyUI node side remains the one unguarded copy of the offset.
 
 **Feasibility + fit proven (2026-05-29):** forward+backward on the real 22B (int8 + block-swap + grad-ckpt) gives a finite loss with `∂loss/∂reference ≠ 0` (the reference is load-bearing — the trainer twin of "remove reference → output stops tracking") at **8.70 GB peak**. `block_swap_blocks=36` is overkill here; startup (~17.8 GB, full int8 model pre-swap) is the tight point, so the config uses 24 and can go ~16.
 
-**Inference/eval lives in ComfyUI, not the trainer.** Eval generation runs through ComfyUI nodes (the AUDIO twin of `LTXAddVideoICLoRAGuide` / `…Advanced`), reusing ltx-core `AudioConditionByReferenceLatent` + the lipdub patchify — there is no audio-reference inference path in `inference.py`/the validation sampler. So train configs for this strategy keep validation disabled; the gate is the offline audio-swap F0-tracking eval.
+**Inference/eval lives in ComfyUI, not the trainer.** Eval generation runs through ComfyUI nodes (the AUDIO twin of `LTXAddVideoICLoRAGuide` / `…Advanced`), reusing ltx-core `AudioConditionByReferenceLatent` + the lipdub patchify. Upstream now ships `ltx_pipelines.lipdub.LipDubPipeline` (a Python inference twin of the lipdub task — video+audio reference), but our audio-ONLY-reference strategy still has no Python inference path in `inference.py`/the validation sampler; ComfyUI remains the eval vehicle. So train configs for this strategy keep validation disabled; the gate is the offline audio-swap F0-tracking eval.
 
 **First learning run (2026-05-30):** trained `audio_reference` on the **distilled** 22B at commit `05f4e2e`, recipe `configs/ltx2_audio_reference.yaml` (the actual run used a gitignored real-path copy `_run_audio_ref.yaml`), on the 291-pair pitch-reference dataset (a voiced reference tone → the generated audio adopts that pitch). int8-quanto + block-swap 24, 2000 steps, validation off → checkpoint. The F0-tracking eval is audio claude's (ComfyUI, stock `LTXVAudioVAEEncode` + `LTXVSetAudioRefTokens`) — confirm the eval's audio VAE runs **fp32** to match the training encode.
 
