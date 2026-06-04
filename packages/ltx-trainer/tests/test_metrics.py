@@ -95,10 +95,26 @@ def test_converged_when_both_plateau():
 
 def test_reference_decorative_when_gap_not_positive():
     m = ConvergenceMonitor(warmup_evals=1, ref_gap_tol=0.0)
-    # ref_gap = loss(shuffled ref) - loss(correct ref); <=0 means the model ignores the ref
+    # ref_gap = loss(shuffled ref) - loss(correct ref); <=0 means the ref isn't helping RECONSTRUCTION
     s = _feed(m, train_curve=[1.0, 0.7, 0.55], ref_curve=[0.0, -0.01, 0.0])
     assert s.ref_decorative
     assert any("reference" in msg.lower() for msg in s.messages)
+
+
+def test_reference_gap_verdict_is_ambiguity_aware():
+    """The flag's MESSAGE must not over-claim. A gap <= tol means the reference is not helping
+    reconstruction — on leaked-target tasks (identity: the target video shows the face) that is
+    AMBIGUOUS, not proof the reference is unused: the 2026-06 identity runs measured negative
+    gaps on a model that visibly responds to references at generation time (a load-bearing
+    reference can pay a reconstruction penalty by pulling toward a generic rendition). The
+    verdict must say "ambiguous" and route to the generation-from-noise swap eval as the
+    arbiter, instead of flatly declaring the model "not using" the reference."""
+    m = ConvergenceMonitor(warmup_evals=1, ref_gap_tol=0.0)
+    s = _feed(m, train_curve=[1.0, 0.7, 0.55], ref_curve=[0.0, -0.01, 0.0])
+    msg = " ".join(s.messages).lower()
+    assert "ambiguous" in msg
+    assert "swap" in msg
+    assert "not using it" not in msg  # the old over-claim
 
 
 def test_reference_load_bearing_when_gap_positive():

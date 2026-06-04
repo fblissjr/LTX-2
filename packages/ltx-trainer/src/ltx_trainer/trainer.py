@@ -324,7 +324,12 @@ class LtxvTrainer:
                             if gap is not None:
                                 self._latest_ref_gap = gap
                                 fresh_ref_gap = gap
-                                verdict = "load-bearing" if gap > 0 else "decorative (model not using the reference)"
+                                verdict = (
+                                    "helping reconstruction"
+                                    if gap > 0
+                                    else "not helping reconstruction (AMBIGUOUS on leaked-target "
+                                    "tasks — the swap eval is the arbiter)"
+                                )
                                 logger.info(
                                     f"[ref-gap] step {self._global_step}: "
                                     f"loss(wrong ref) - loss(correct ref) = {gap:+.4f} — {verdict}"
@@ -564,9 +569,12 @@ class LtxvTrainer:
     def _reference_attribution_gap(self, batch: dict[str, Any], prev_reference: dict[str, Tensor] | None = None) -> float | None:
         """``loss(wrong reference) - loss(correct reference)`` under paired noise.
 
-        ``> 0`` means the correct reference lowers the loss — the model is using it, i.e. the
-        reference is load-bearing (the training-time twin of the inference "remove the reference
-        → output stops tracking" check). ``~0`` means the reference is decorative. Returns
+        ``> 0`` means the correct reference lowers the loss — it is helping reconstruction.
+        ``~0`` or negative is AMBIGUOUS on leaked-target tasks (the noised target can carry
+        the controlled attribute itself, and an influential reference can pay a reconstruction
+        penalty by pulling toward a generic rendition — measured on the 2026-06 identity runs):
+        it does NOT prove the reference unused; the generation-from-noise swap eval is the
+        arbiter. Returns
         ``None`` until a previous batch's reference has been cached to act as the "wrong" one
         (batch_size is 1, so the wrong reference is the prior step's clip — a different target
         attribute). The two forwards share timestep + noise (see ``metrics.paired_difference``);

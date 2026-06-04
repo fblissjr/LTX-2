@@ -62,9 +62,10 @@ class ConvergenceMonitor:
       - overfitting  : held-out loss has risen for `overfit_patience` consecutive evals.
       - converged    : plateaued and not overfitting (no more to gain → safe to stop).
       - ref_decorative: reference-attribution gap (loss with a shuffled reference minus
-                       loss with the correct reference) <= `ref_gap_tol`, i.e. the model
-                       isn't using the in-context reference (the task-specific "not
-                       learning the coupling" signal).
+                       loss with the correct reference) <= `ref_gap_tol`, i.e. the reference
+                       is not helping RECONSTRUCTION. NOTE this is ambiguous on leaked-target
+                       tasks (the noised target can carry the controlled attribute itself):
+                       it flags "run the swap eval", it does not prove the reference unused.
 
     Pure: feed scalars, never touches the model.
     """
@@ -154,9 +155,18 @@ class ConvergenceMonitor:
 
         if self._last_ref_gap is not None and self._last_ref_gap <= self.ref_gap_tol:
             s.ref_decorative = True
+            # Deliberately hedged: a non-positive gap means the reference is not helping
+            # RECONSTRUCTION. On leaked-target tasks (e.g. identity, where the noised target
+            # carries the answer) that is AMBIGUOUS — the 2026-06 identity runs measured
+            # negative gaps on a model that visibly responds to references at generation time
+            # (a load-bearing reference can pay a reconstruction penalty by pulling toward a
+            # generic rendition of the shared attribute). Only a generation-from-noise swap
+            # eval can tell "unused" from "load-bearing but reconstruction-penalized".
             s.messages.append(
                 f"reference-attribution gap {self._last_ref_gap:+.4f} <= {self.ref_gap_tol} — the "
-                "reference is decorative (model not using it / not learning the coupling)"
+                "reference is not helping reconstruction. AMBIGUOUS on leaked-target tasks "
+                "(could be unused OR load-bearing-but-penalized); the generation-from-noise "
+                "swap eval is the arbiter"
             )
 
         return s
