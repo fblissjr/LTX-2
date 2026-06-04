@@ -367,7 +367,7 @@ flow_matching:
 
 | Parameter                  | Description                                                |
 |----------------------------|------------------------------------------------------------|
-| `timestep_sampling_mode`   | Sampling strategy: `"uniform"` or `"shifted_logit_normal"` |
+| `timestep_sampling_mode`   | Sampling strategy: `"uniform"`, `"shifted_logit_normal"`, or `"high_sigma_mixture"` (soft high-noise bias for reference-conditioned tasks; params: `band_min`, `band_prob`) |
 | `timestep_sampling_params` | Additional parameters for the sampling strategy            |
 
 ## 🚀 Next Steps

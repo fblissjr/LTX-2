@@ -511,9 +511,13 @@ class WandbConfig(ConfigBaseModel):
 class FlowMatchingConfig(ConfigBaseModel):
     """Configuration for flow matching training"""
 
-    timestep_sampling_mode: Literal["uniform", "shifted_logit_normal"] = Field(
+    timestep_sampling_mode: Literal["uniform", "shifted_logit_normal", "high_sigma_mixture"] = Field(
         default="shifted_logit_normal",
-        description="Mode to use for timestep sampling",
+        description=(
+            "Mode to use for timestep sampling. 'high_sigma_mixture' soft-biases steps toward "
+            "high noise (params: band_min, band_prob) — the leak fix for reference-conditioned "
+            "tasks where the noised target carries the controlled attribute at low sigma."
+        ),
     )
 
     timestep_sampling_params: dict = Field(

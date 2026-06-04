@@ -134,9 +134,43 @@ class ShiftedLogitNormalTimestepSampler(TimestepSampler):
         return shift
 
 
+class HighSigmaMixtureTimestepSampler(TimestepSampler):
+    """Mixture biased toward HIGH sigma: with probability ``band_prob`` draw from
+    ``uniform[band_min, 1]``, otherwise from ``uniform[0, 1]``.
+
+    The training-side leak fix for reference-conditioned tasks (e.g. the audio-reference
+    IC-LoRA on identity data): at low sigma the noised target still carries the controlled
+    attribute, so the model has little pressure to read the in-context reference — biasing
+    steps toward high sigma puts the training weight where the reference must do the work.
+    A SOFT mixture rather than a hard floor, deliberately: the LoRA applies at every sigma
+    at inference, so a band it never trained on would be free to drift. A hard floor remains
+    available via ``uniform`` + ``min_value`` if an experiment wants one.
+    """
+
+    def __init__(self, band_min: float = 0.6, band_prob: float = 0.5):
+        if not 0.0 <= band_min <= 1.0:
+            raise ValueError(f"band_min must be in [0, 1], got {band_min}")
+        if not 0.0 <= band_prob <= 1.0:
+            raise ValueError(f"band_prob must be in [0, 1], got {band_prob}")
+        self.band_min = band_min
+        self.band_prob = band_prob
+
+    def sample(self, batch_size: int, seq_length: int | None = None, device: torch.device = None) -> torch.Tensor:  # noqa: ARG002
+        full = torch.rand(batch_size, device=device)
+        banded = torch.rand(batch_size, device=device) * (1.0 - self.band_min) + self.band_min
+        take_band = torch.rand(batch_size, device=device) < self.band_prob
+        return torch.where(take_band, banded, full)
+
+    def sample_for(self, batch: torch.Tensor) -> torch.Tensor:
+        if batch.ndim != 3:
+            raise ValueError(f"Batch should have 3 dimensions, got {batch.ndim}")
+        return self.sample(batch.shape[0], device=batch.device)
+
+
 SAMPLERS = {
     "uniform": UniformTimestepSampler,
     "shifted_logit_normal": ShiftedLogitNormalTimestepSampler,
+    "high_sigma_mixture": HighSigmaMixtureTimestepSampler,
 }
 
 
