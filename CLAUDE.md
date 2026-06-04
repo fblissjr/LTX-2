@@ -100,5 +100,6 @@ Bilateral async channel between this Claude (LTX-2 fork side) and audio-loop-lab
 ## Pointers
 
 - Parent project rules: `../../CLAUDE.md`
-- Trainer plan + design history: `../../internal/audio_iclora_status.md`, `../../internal/audio_iclora_roadmap.md`, `../../internal/block_swap_port_plan.md` (all private clone)
+- Internal wiki (read first): `internal/wiki/index.md` — LLM-consumable knowledge base for the trainer work (strategy mechanics, 4090 fit, eval design, config keys, module/test maps), mined 2026-06-04 from this fork's docs/internal/transcripts/memory + the parent repo's trainer docs. Gitignored, local machine only.
+- Trainer plan + design history (living source): `coderef/ComfyUI-AudioLoopHelper/internal/audio_iclora_training/` — `status.md`, `roadmap.md`, `block_swap_port_plan.md`, `prior_art.md`, plus design/eval docs (private clone only; the wiki distills these — defer to them when they disagree).
 - Public fork docs: `docs/audio_iclora_trainer_notes.md` (the audio-IC-LoRA experiment write-up; linked from this fork's README + the companion repo's `docs/audio_iclora/index.md`). Per-package docs: each package's own `README.md`.
