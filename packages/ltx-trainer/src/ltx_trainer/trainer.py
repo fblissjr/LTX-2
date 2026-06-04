@@ -35,6 +35,7 @@ from ltx_trainer.hf_hub_utils import push_to_hub
 from ltx_trainer.lr_schedulers import build_lr_scheduler
 from ltx_trainer.metrics import (
     EMA,
+    REF_GAP_AMBIGUITY_NOTE,
     ConvergenceMonitor,
     MetricsWriter,
     build_metrics_row,
@@ -327,8 +328,7 @@ class LtxvTrainer:
                                 verdict = (
                                     "helping reconstruction"
                                     if gap > 0
-                                    else "not helping reconstruction (AMBIGUOUS on leaked-target "
-                                    "tasks — the swap eval is the arbiter)"
+                                    else f"not helping reconstruction ({REF_GAP_AMBIGUITY_NOTE})"
                                 )
                                 logger.info(
                                     f"[ref-gap] step {self._global_step}: "

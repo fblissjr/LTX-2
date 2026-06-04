@@ -90,8 +90,9 @@ def main() -> None:
         with torch.inference_mode():
             if args.channel_aug_variants > 0:
                 # Variant 0 = clean; 1..K-1 = channel-augmented. Per-file seed derived from
-                # the output's relative path (stable across manifest reorderings and re-runs).
-                file_seed = args.seed + zlib.crc32(str(dst.name).encode())
+                # the output's path relative to output_dir (stable across manifest reorderings
+                # and re-runs; distinct even when basenames repeat across subfolders).
+                file_seed = args.seed + zlib.crc32(str(dst.relative_to(args.output_dir)).encode())
                 variants = [waveform]
                 for k in range(1, args.channel_aug_variants):
                     gen = torch.Generator().manual_seed(file_seed + k)

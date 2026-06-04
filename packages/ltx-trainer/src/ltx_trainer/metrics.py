@@ -20,6 +20,16 @@ from pathlib import Path
 from typing import Any
 
 
+# The one user-facing claim about a non-positive reference-attribution gap, shared by the
+# convergence monitor's message and the trainer's per-step verdict so the wording cannot
+# drift between the two log surfaces. Hedged deliberately: see ConvergenceMonitor's
+# ref_decorative docs for the leaked-target ambiguity this encodes.
+REF_GAP_AMBIGUITY_NOTE = (
+    "AMBIGUOUS on leaked-target tasks (could be unused OR load-bearing-but-penalized); "
+    "the generation-from-noise swap eval is the arbiter"
+)
+
+
 class EMA:
     """Exponential moving average. First value seeds it; `beta` is the decay (higher =
     smoother). Used to denoise the very noisy per-step flow-matching loss before it's
@@ -164,9 +174,7 @@ class ConvergenceMonitor:
             # eval can tell "unused" from "load-bearing but reconstruction-penalized".
             s.messages.append(
                 f"reference-attribution gap {self._last_ref_gap:+.4f} <= {self.ref_gap_tol} — the "
-                "reference is not helping reconstruction. AMBIGUOUS on leaked-target tasks "
-                "(could be unused OR load-bearing-but-penalized); the generation-from-noise "
-                "swap eval is the arbiter"
+                f"reference is not helping reconstruction. {REF_GAP_AMBIGUITY_NOTE}"
             )
 
         return s

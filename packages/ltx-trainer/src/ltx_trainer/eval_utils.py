@@ -22,7 +22,9 @@ def load_audio_latents_file(path: str | Path, variant: int = 0) -> Tensor:
       ``precompute_reference_audio`` output).
     - ``{latents: [K, C, T, F], variants: K}`` — a K-variant reference stack
       (``variant`` selects which; training picks one at random per load, an eval must be
-      deterministic about it).
+      deterministic about it). By the precompute convention, **variant 0 is the clean
+      (un-augmented) encode** and 1..K-1 are channel-augmented — default to 0 for evals
+      unless you are deliberately evaluating under augmentation.
     - A bare ``[C, T, F]`` tensor.
     """
     # weights_only=True matches PrecomputedDataset's loading of the same files (tensors +
