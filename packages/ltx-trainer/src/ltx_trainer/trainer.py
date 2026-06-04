@@ -11,7 +11,6 @@ from typing import Any, Callable
 
 import torch
 import wandb
-import yaml
 from accelerate import Accelerator, DistributedDataParallelKwargs, DistributedType
 from accelerate.utils import gather_object, send_to_device, set_seed
 from peft import LoraConfig, get_peft_model, get_peft_model_state_dict, set_peft_model_state_dict
@@ -29,6 +28,7 @@ from ltx_core.text_encoders.gemma import convert_to_additive_mask
 from ltx_trainer import logger
 from ltx_trainer.config import LtxTrainerConfig
 from ltx_trainer.config_display import print_config
+from ltx_trainer.config_io import dump_config_yaml
 from ltx_trainer.datasets import PrecomputedDataset
 from ltx_trainer.gpu_utils import free_gpu_memory, free_gpu_memory_context, get_gpu_memory_gb
 from ltx_trainer.hf_hub_utils import push_to_hub
@@ -1543,7 +1543,9 @@ class LtxvTrainer:
 
         config_path = Path(self._config.output_dir) / "training_config.yaml"
         with open(config_path, "w") as f:
-            yaml.dump(self._config.model_dump(), f, default_flow_style=False, indent=2)
+            # Safe dumper: tuples (e.g. video_dims) become plain lists instead of !!python/tuple
+            # tags, so the dump stays yaml.safe_load-able (see config_io).
+            dump_config_yaml(self._config.model_dump(), f)
 
         logger.info(f"💾 Training configuration saved to: {config_path.relative_to(self._config.output_dir)}")
 

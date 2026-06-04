@@ -18,6 +18,8 @@ import argparse
 import json
 from pathlib import Path
 
+from ltx_trainer.config_io import load_config_yaml
+
 # metrics.jsonl key -> wandb panel key, so a replay matches the live-run schema.
 _TRAIN_MAP = {
     "loss": "train/loss",
@@ -42,26 +44,6 @@ def _to_wandb(row: dict) -> dict:
             continue
         out[_TRAIN_MAP.get(k, k)] = v  # train/loss_sigma_* already namespaced -> pass through
     return out
-
-
-def load_config_yaml(path: str | Path) -> dict:
-    """Load a training_config.yaml as dumped by the trainer. PyYAML writes python-object tags
-    (e.g. ``video_dims: !!python/tuple``) that ``safe_load`` rejects; tolerate them as tuples so
-    the replay can attach the trainer's own config dump.
-
-    Security note: this stays SafeLoader-based. The ONLY extension is the ``python/tuple`` tag,
-    constructed from an already-safe sequence — ``!!python/object`` / ``!!python/name`` etc.
-    remain rejected, so no arbitrary object construction or code execution is possible."""
-    import yaml
-
-    class _Loader(yaml.SafeLoader):
-        pass
-
-    _Loader.add_constructor(
-        "tag:yaml.org,2002:python/tuple",
-        lambda loader, node: tuple(loader.construct_sequence(node)),
-    )
-    return yaml.load(Path(path).read_text(), Loader=_Loader)
 
 
 def main() -> None:
