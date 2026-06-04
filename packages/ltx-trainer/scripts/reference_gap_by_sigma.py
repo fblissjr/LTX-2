@@ -14,8 +14,9 @@ do NOT expect a clean "0 at low sigma, rising at high sigma" shape. A NEGATIVE g
 reference reconstructs WORSE) is possible and ambiguous: it can mean the reference is load-bearing
 but pulls toward a generic rendition of the shared attribute (a reconstruction penalty), or it can
 be noise — which is why every row now carries a 95% CI and its raw per-pair gaps. Reconstruction
-gaps on leaked-target (e.g. same-clip-reference) data cannot localize generation-time reference
-control; treat the curve as a canary, and treat generation-from-noise swaps as the arbiter.
+gaps cannot localize generation-time reference control whenever the noised target itself leaks
+the controlled attribute (e.g. an identity task, where the target video shows the face);
+treat the curve as a canary, and treat generation-from-noise swaps as the arbiter.
 
 Reuses the trainer's own setup + ref-gap computation verbatim (no re-derivation): builds LtxvTrainer
 with the trained LoRA loaded, overrides the timestep sampler to a fixed sigma per sweep point, and
