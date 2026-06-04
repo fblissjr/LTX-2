@@ -74,6 +74,8 @@ uv run --group dev python packages/ltx-trainer/scripts/train.py <config.yaml>
 
 For the 4090 training config: set `acceleration.block_swap_blocks: 36`, `acceleration.quantization: int8-quanto`, `optimization.enable_gradient_checkpointing: true`.
 
+**After any `uv sync` / lock change, verify torch before declaring done** (`.venv/bin/python -c "import torch; torch.cuda.is_available()"`): the venv carries out-of-band CUDA pieces a plain sync can prune (it once stripped libcusparseLt/cudnn files and broke torch import; fix = reinstall the `nvidia-*` set at the prior versions).
+
 ## Git conventions for this fork
 
 - Branch: `audio-guidance-iclora-vtv`. **Never push without explicit user approval.**
