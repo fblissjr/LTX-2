@@ -77,8 +77,10 @@ def apply_input_audio_conditioning(
             f"for {state.latent.shape[1]} (audio length derives from num_frames / frame_rate) — "
             "trim or pad the clip to the generation duration."
         )
+    # One clone so latent/clean_latent don't share storage (clean_latent is the loop's
+    # re-imposition source; aliasing would let any future in-place consumer corrupt it).
     return LatentState(
-        latent=tokens.clone(),
+        latent=tokens,
         denoise_mask=torch.zeros_like(state.denoise_mask),
         positions=state.positions,
         clean_latent=tokens.clone(),
@@ -183,9 +185,9 @@ class GenerationConfig:
     #   generated (the audio->video coupling eval shape).
     # - reference_audio_latents: audio-VAE latents [C, T, F] (a precomputed reference_audio_latents
     #   .pt) appended as an in-context reference at NEGATIVE RoPE positions — both modalities stay
-    #   generated; the reference steers (the audio-reference IC-LoRA swap-eval shape). NOTE: when
-    #   trainer-side and ComfyUI renders disagree about a checkpoint ranking, the ComfyUI path is
-    #   the shipped regime and arbitrates.
+    #   generated; the reference steers (the audio-reference IC-LoRA swap-eval shape). The
+    #   eval-regime policy (ComfyUI arbitrates ranking disagreements) lives with the sweep script
+    #   and the wiki page, not here.
     input_audio_latents: Tensor | None = None
     reference_audio_latents: Tensor | None = None
     include_reference_in_output: bool = False  # For IC-LoRA: concatenate original reference with generated output

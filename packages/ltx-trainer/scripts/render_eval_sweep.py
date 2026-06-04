@@ -153,13 +153,6 @@ def main() -> None:
     if args.lora_path is not None:
         transformer = load_lora_weights(transformer, args.lora_path)
 
-    sampler = ValidationSampler(
-        transformer=transformer,
-        vae_decoder=components.video_vae_decoder,
-        vae_encoder=None,
-        audio_decoder=components.audio_vae_decoder,
-        vocoder=components.vocoder,
-    )
     audio_sample_rate = components.vocoder.output_sampling_rate
 
     manifest_path = out_dir / "manifest.jsonl"
@@ -182,10 +175,21 @@ def main() -> None:
                     seed=seed,
                     generate_audio=True,
                     cached_embeddings=cached,
-                    **{f"{lane}_latents": latents},
+                    input_audio_latents=latents if lane == "input_audio" else None,
+                    reference_audio_latents=latents if lane == "reference_audio" else None,
                 )
+                # ValidationSampler.__init__ only stores refs (the model is shared), so a
+                # per-arm sampler is free and lets the per-arm progress context ride the
+                # constructor instead of poking a private attribute.
                 with StandaloneSamplingProgress(num_steps=args.num_inference_steps) as progress:
-                    sampler._sampling_context = progress
+                    sampler = ValidationSampler(
+                        transformer=transformer,
+                        vae_decoder=components.video_vae_decoder,
+                        vae_encoder=None,
+                        audio_decoder=components.audio_vae_decoder,
+                        vocoder=components.vocoder,
+                        sampling_context=progress,
+                    )
                     video, audio = sampler.generate(config=config, device=args.device)
 
                 video_path = out_dir / f"{arm}.mp4"
