@@ -748,7 +748,7 @@ class WandbConfig(ConfigBaseModel):
 class FlowMatchingConfig(ConfigBaseModel):
     """Configuration for flow matching training"""
 
-    timestep_sampling_mode: Literal["uniform", "shifted_logit_normal"] = Field(
+    timestep_sampling_mode: Literal["uniform", "shifted_logit_normal", "high_sigma_mixture"] = Field(
         default="shifted_logit_normal",
         description="Mode to use for timestep sampling",
     )
