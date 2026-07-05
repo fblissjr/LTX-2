@@ -67,3 +67,12 @@ wandb/
 
 # Binary files
 *.so
+
+# Run logs (may contain local model paths from a config dump)
+*.log
+
+# Cross-repo memo channel + Claude harness + local internal docs (depend on a
+# reverse symlink other clones don't have; gitignore so each clone configures locally).
+.claude/
+internal/
+coderef/

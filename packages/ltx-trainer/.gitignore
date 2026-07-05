@@ -1,3 +1,6 @@
 datasets
 outputs
 wandb
+
+# Local real-path run configs (contain machine-specific model/data paths).
+configs/_run_*.yaml
