@@ -372,6 +372,16 @@ class OptimizationConfig(ConfigBaseModel):
         description="Enable gradient checkpointing to save memory at the cost of slower training",
     )
 
+    early_stop_on_convergence: bool = Field(
+        default=False,
+        description=(
+            "When True, the training loop stops early once the convergence "
+            "monitor reports should_stop (held-out loss overfitting OR "
+            "train+held-out converged). Default False preserves the current "
+            "run-to-completion behavior."
+        ),
+    )
+
 
 class AccelerationConfig(ConfigBaseModel):
     """Configuration for hardware acceleration and compute optimization"""
@@ -398,6 +408,15 @@ class AccelerationConfig(ConfigBaseModel):
         "(e.g. AdamW for full fine-tuning or high-rank LoRA) and validation OOMs because the "
         "VAE decoder + transformer + optimizer state cannot coexist on the GPU. Has no effect "
         "for FSDP (sharded state). Disabled by default.",
+    )
+
+    block_swap_blocks: int = Field(
+        default=0,
+        description="Stream the last N transformer blocks GPU<->CPU during forward + backward to "
+        "fit large bases on small VRAM. 0 disables (default). For LTX-2 22B int8 on a 24 GB 4090: "
+        "the base alone is ~22.97 GB resident with 0 swap (no activation headroom); ~30-40 of 48 "
+        "blocks swapped frees ~14-18 GB. Per-step cost is the GPU<->CPU PCIe transfer of swapped "
+        "blocks. See ltx_trainer.block_swap.",
     )
 
 
@@ -556,6 +575,28 @@ class ValidationConfig(ConfigBaseModel):
     skip_initial_validation: bool = Field(
         default=False,
         description="Skip validation video sampling at step 0 (beginning of training)",
+    )
+
+    holdout_data_root: str | None = Field(
+        default=None,
+        description="Precomputed held-out dataset root (same layout as data.preprocessed_data_root, "
+        "DISJOINT samples — e.g. unseen identities) used to compute a validation loss + reference gap. "
+        "None disables the held-out pass. This is loss-only (no sample generation), so it works for "
+        "strategies whose generation lives outside the trainer (audio_reference).",
+    )
+
+    holdout_interval: int = Field(
+        default=0,
+        description="Run the held-out val pass every N optimization steps (0 = disabled). Train-loss "
+        "falling while val-loss flattens/rises is overfitting; this is what makes it visible.",
+        ge=0,
+    )
+
+    holdout_max_batches: int = Field(
+        default=0,
+        description="Cap the number of held-out batches per val pass (0 = use the whole held-out set). "
+        "Keep small for a fast, low-variance signal on large held-out sets.",
+        ge=0,
     )
 
     include_reference_in_output: bool = Field(
