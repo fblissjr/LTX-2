@@ -23,6 +23,7 @@ _SCRIPTS = [
     "generate_synthetic_av_data.py",
     "precompute_reference_audio.py",
     "probe_vae_temporal_aliasing.py",
+    "render_eval_sweep.py",
     "replay_metrics_to_wandb.py",
     "run_audio_coupling_eval.py",
     "run_e2e_smoke.py",
