@@ -67,26 +67,6 @@ StepCallback = Callable[[int, int, list[Path]], None]  # (step, total, list[samp
 MEMORY_CHECK_INTERVAL = 200
 
 
-def _validation_will_run(validation_config) -> bool:
-    """True iff validation will actually fire (interval set + > 0). Codec models
-    (audio VAE, vocoder, video VAE encoder for image conditioning) are
-    validation-only at train time — training reads pre-encoded latents from
-    process_dataset.py. When validation is off, loading them is pure waste of
-    VRAM that an int8 22B base can't afford on a 24 GB card."""
-    return bool(getattr(validation_config, "interval", None))
-
-
-def _offload_frozen_codecs(trainer) -> None:
-    """Move all frozen codecs to CPU during training. The old code did this for
-    the video VAE encoder/decoder only — leaving audio_vae + vocoder resident
-    on GPU. Symmetric offload across video + audio so the asymmetry doesn't
-    silently leak ~700 MB next time a codec gets added."""
-    for attr in ("_vae_decoder", "_vae_encoder", "_audio_vae", "_vocoder"):
-        m = getattr(trainer, attr, None)
-        if m is not None:
-            setattr(trainer, attr, m.to("cpu"))
-
-
 class TrainingStats(BaseModel):
     """Statistics collected during training"""
 

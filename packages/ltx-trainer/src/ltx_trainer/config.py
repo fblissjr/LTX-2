@@ -372,16 +372,6 @@ class OptimizationConfig(ConfigBaseModel):
         description="Enable gradient checkpointing to save memory at the cost of slower training",
     )
 
-    early_stop_on_convergence: bool = Field(
-        default=False,
-        description=(
-            "When True, the training loop stops early once the convergence "
-            "monitor reports should_stop (held-out loss overfitting OR "
-            "train+held-out converged). Default False preserves the current "
-            "run-to-completion behavior."
-        ),
-    )
-
 
 class AccelerationConfig(ConfigBaseModel):
     """Configuration for hardware acceleration and compute optimization"""
@@ -575,28 +565,6 @@ class ValidationConfig(ConfigBaseModel):
     skip_initial_validation: bool = Field(
         default=False,
         description="Skip validation video sampling at step 0 (beginning of training)",
-    )
-
-    holdout_data_root: str | None = Field(
-        default=None,
-        description="Precomputed held-out dataset root (same layout as data.preprocessed_data_root, "
-        "DISJOINT samples — e.g. unseen identities) used to compute a validation loss + reference gap. "
-        "None disables the held-out pass. This is loss-only (no sample generation), so it works for "
-        "strategies whose generation lives outside the trainer (audio_reference).",
-    )
-
-    holdout_interval: int = Field(
-        default=0,
-        description="Run the held-out val pass every N optimization steps (0 = disabled). Train-loss "
-        "falling while val-loss flattens/rises is overfitting; this is what makes it visible.",
-        ge=0,
-    )
-
-    holdout_max_batches: int = Field(
-        default=0,
-        description="Cap the number of held-out batches per val pass (0 = use the whole held-out set). "
-        "Keep small for a fast, low-variance signal on large held-out sets.",
-        ge=0,
     )
 
     include_reference_in_output: bool = Field(
