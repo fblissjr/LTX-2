@@ -1,0 +1,116 @@
+#!/usr/bin/env python
+"""Precompute the ``reference_audio_latents`` channel for audio-reference IC-LoRA training.
+
+Reads a JSONL manifest pairing each clip (video) with a reference audio WAV (e.g. a
+voiced tone at the target pitch), encodes each WAV through the LTX audio VAE encoder
+(same encoder + dtype as the ``audio_latents`` AV precompute), and writes the latent to
+``<output-dir>/<clip-rel>.pt`` — the same relative path as the clip's video latent, so
+``PrecomputedDataset`` pairs them. The .pt format matches ``audio_latents`` exactly, so
+``AudioReferenceStrategy`` consumes the reference identically to the target audio.
+
+Example:
+    uv run python packages/ltx-trainer/scripts/precompute_reference_audio.py \
+        --model-path <ltx2_checkpoint>.safetensors \
+        --manifest <dataset>/manifest.jsonl \
+        --data-root <dataset> \
+        --output-dir <dataset>/precomputed/reference_audio_latents
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import zlib
+from pathlib import Path
+
+import torch
+import torchaudio
+
+from ltx_trainer import logger
+from ltx_trainer.model_loader import load_audio_vae_encoder
+from ltx_trainer.reference_audio import (
+    augment_reference_waveform,
+    build_audio_processor,
+    encode_reference_waveform,
+    reference_output_path,
+)
+
+
+def _read_manifest(path: Path) -> list[dict]:
+    return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--model-path", required=True, help="LTX-2 checkpoint (.safetensors) holding the audio VAE")
+    ap.add_argument("--manifest", required=True, type=Path, help="JSONL: one row per clip with video + reference keys")
+    ap.add_argument("--data-root", required=True, type=Path, help="Root the manifest paths are relative to")
+    ap.add_argument("--output-dir", required=True, type=Path, help="Destination reference_audio_latents/ directory")
+    ap.add_argument("--video-key", default="video", help="Manifest field with the clip (video) path")
+    ap.add_argument("--reference-key", default="reference", help="Manifest field with the reference WAV path")
+    ap.add_argument("--device", default="cuda", help="Device for the audio VAE encoder")
+    ap.add_argument("--overwrite", action="store_true", help="Re-encode even if the output .pt already exists")
+    ap.add_argument(
+        "--channel-aug-variants",
+        type=int,
+        default=0,
+        help=(
+            "K > 0 writes a [K, C, T, F] variant stack per reference (variants key included; "
+            "PrecomputedDataset picks one at random per load): variant 0 is the clean encode, "
+            "variants 1..K-1 are channel-augmented (gain jitter / peaking EQ / light noise) so "
+            "session-channel fingerprints can't become the learned shortcut. 0 (default) keeps "
+            "the plain single-latent output."
+        ),
+    )
+    ap.add_argument("--seed", type=int, default=0, help="Base seed for channel augmentation (per-file derived)")
+    args = ap.parse_args()
+
+    device = torch.device(args.device)
+    # Mirror scripts/process_videos.py's audio setup so reference latents come from an
+    # IDENTICAL encoder to the target audio_latents: audio VAE in float32 (quality), and
+    # the processor moved on-device (its STFT window must share the waveform's device).
+    encoder = load_audio_vae_encoder(args.model_path, device=device, dtype=torch.float32)
+    processor = build_audio_processor(encoder).to(device)
+
+    rows = _read_manifest(args.manifest)
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+    logger.info(f"Encoding {len(rows)} reference audio clips -> {args.output_dir}")
+
+    n_done = 0
+    for row in rows:
+        dst = reference_output_path(row[args.video_key], args.output_dir, data_root=args.data_root)
+        if dst.is_file() and not args.overwrite:
+            continue
+
+        ref_path = Path(row[args.reference_key])
+        if not ref_path.is_absolute():
+            ref_path = args.data_root / ref_path
+        waveform, sample_rate = torchaudio.load(str(ref_path))
+
+        with torch.inference_mode():
+            if args.channel_aug_variants > 0:
+                # Variant 0 = clean; 1..K-1 = channel-augmented. Per-file seed derived from
+                # the output's path relative to output_dir (stable across manifest reorderings
+                # and re-runs; distinct even when basenames repeat across subfolders).
+                file_seed = args.seed + zlib.crc32(str(dst.relative_to(args.output_dir)).encode())
+                variants = [waveform]
+                for k in range(1, args.channel_aug_variants):
+                    gen = torch.Generator().manual_seed(file_seed + k)
+                    variants.append(augment_reference_waveform(waveform, sample_rate, generator=gen))
+                encoded = [encode_reference_waveform(encoder, processor, w, sample_rate) for w in variants]
+                out = encoded[0]
+                out["latents"] = torch.stack([e["latents"].cpu().contiguous() for e in encoded])
+                out["variants"] = len(encoded)
+            else:
+                out = encode_reference_waveform(encoder, processor, waveform, sample_rate)
+                out["latents"] = out["latents"].cpu().contiguous()
+
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        torch.save(out, dst)
+        n_done += 1
+
+    logger.info(f"Done: wrote {n_done} reference latents ({len(rows) - n_done} skipped/existing) to {args.output_dir}")
+
+
+if __name__ == "__main__":
+    main()

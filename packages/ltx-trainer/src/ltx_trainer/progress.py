@@ -13,6 +13,22 @@ from rich.progress import (
 )
 
 
+def _format_training_info(
+    *,
+    loss: float,
+    lr: float,
+    step_time: float,
+    grad_norm: float | None = None,
+) -> str:
+    """Build the one-line training readout for the progress bar / logs. ``grad_norm`` is
+    appended as ``|g|`` only when available (it is absent on gradient-accumulation
+    sub-steps and when clipping is off)."""
+    info = f"Loss: {loss:.4f} | LR: {lr:.2e} | {step_time:.2f}s/step"
+    if grad_norm is not None:
+        info += f" | |g|: {grad_norm:.2f}"
+    return info
+
+
 class SamplingContext:
     """Context for validation sampling progress tracking.
     Provides a unified progress display showing current video and denoising step.
@@ -125,6 +141,7 @@ class TrainingProgress:
         loss: float,
         lr: float,
         step_time: float,
+        grad_norm: float | None = None,
         advance: bool = True,
     ) -> None:
         """Update the training progress display.
@@ -132,12 +149,13 @@ class TrainingProgress:
             loss: Current training loss
             lr: Current learning rate
             step_time: Time taken for this step in seconds
+            grad_norm: Pre-clip gradient norm for this step, if available
             advance: Whether to advance the progress by one step
         """
         if self._progress is None or self._train_task is None:
             return
 
-        info = f"Loss: {loss:.4f} | LR: {lr:.2e} | {step_time:.2f}s/step"
+        info = _format_training_info(loss=loss, lr=lr, step_time=step_time, grad_norm=grad_norm)
         self._progress.update(
             self._train_task,
             advance=1 if advance else 0,
