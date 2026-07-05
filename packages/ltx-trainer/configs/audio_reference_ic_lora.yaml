@@ -1,0 +1,138 @@
+# =============================================================================
+# LTX-2 Audio-Reference IC-LoRA (lipdub-negative RoPE) Training Configuration
+# =============================================================================
+#
+# Audio-only IC-LoRA where an in-context REFERENCE audio steers a generated-audio
+# attribute (the "transfer" paradigm: unmatched content, shared attribute carried
+# by the reference, neutral caption). Expressed entirely through the unified
+# FlexibleStrategy — the ONLY difference from the stock configs/a2a_ic_lora.yaml is
+# the reference condition's `audio_positions_mode: lipdub_negative`.
+#
+# Why lipdub_negative: the shipped inference (ltx-pipelines LipDub / the ComfyUI
+# audio-reference nodes, via ltx-core AudioConditionByReferenceLatent) places the
+# reference at strictly-negative RoPE positions ending just below the target's 0.
+# Training MUST match that geometry or the LoRA silently degrades at inference.
+# The stock a2a path uses positive in-frame positions and is NOT interchangeable.
+# Locked by tests/test_flexible_audio_reference_parity.py (byte-equal vs the real
+# upstream patchify).
+#
+# Dataset structure (preprocessed_data_root/):
+#   conditions/              # Text embeddings per sample
+#   audio_latents/           # Target audio latents (generated)
+#   reference_audio_latents/ # Reference audio latents (conditioning); build with
+#                            #   scripts/precompute_reference_audio.py
+# Data-layout note: files in reference_audio_latents/ are named after the TARGET
+# clip — the name is the dataset PAIRING key, not content provenance.
+# =============================================================================
+
+model:
+  model_path: "path/to/ltx-2-model.safetensors"
+  text_encoder_path: "path/to/gemma-text-encoder"
+  training_mode: "lora"
+  load_checkpoint: null
+
+lora:
+  rank: 32
+  alpha: 32
+  dropout: 0.0
+  # Audio-only IC-LoRA — target the audio attention + FFN modules.
+  target_modules:
+    - "audio_attn1.to_k"
+    - "audio_attn1.to_q"
+    - "audio_attn1.to_v"
+    - "audio_attn1.to_out.0"
+    - "audio_attn2.to_k"
+    - "audio_attn2.to_q"
+    - "audio_attn2.to_v"
+    - "audio_attn2.to_out.0"
+    - "audio_ff.net.0.proj"
+    - "audio_ff.net.2"
+
+training_strategy:
+  name: "flexible"
+  audio:
+    is_generated: true
+    latents_dir: "audio_latents"
+    conditions:
+      - type: reference
+        latents_dir: "reference_audio_latents"
+        probability: 1.0
+        # Load-bearing: match the shipped lipdub / ComfyUI audio-reference inference
+        # geometry (strictly-negative reference RoPE positions). See header.
+        audio_positions_mode: "lipdub_negative"
+
+optimization:
+  learning_rate: 2e-4
+  steps: 2000
+  batch_size: 1
+  gradient_accumulation_steps: 1
+  max_grad_norm: 1.0
+  optimizer_type: "adamw"
+  scheduler_type: "linear"
+  scheduler_params: { }
+  # Required for the 24 GB (4090) fit alongside int8 quantization.
+  enable_gradient_checkpointing: true
+
+acceleration:
+  mixed_precision_mode: "bf16"
+  # int8-quanto is the proven 22B-on-24GB recipe. (Block-swap wiring —
+  # acceleration.block_swap_blocks — is added with the trainer attach hook in a
+  # follow-up; it further lowers the startup peak.)
+  quantization: "int8-quanto"
+  load_text_encoder_in_8bit: false
+  offload_optimizer_during_validation: false
+
+data:
+  preprocessed_data_root: "/path/to/preprocessed/data"
+  num_dataloader_workers: 2
+
+validation:
+  # Disabled by design for this strategy: the audio-reference eval is the SCRIPTED
+  # lane (scripts/render_eval_sweep.py + the ComfyUI generate-from-noise swap eval),
+  # not the trainer's inline validation. interval: null keeps validation off.
+  interval: null
+  samples:
+    - prompt: "the reference attribute rendered on new content"
+      conditions:
+        - type: reference
+          audio: "/path/to/reference_audio.wav"
+  negative_prompt: "worst quality, distorted, noisy"
+  video_dims: [ 512, 512, 81 ]
+  frame_rate: 25.0
+  seed: 42
+  inference_steps: 30
+  guidance_scale: 4.0
+  stg_scale: 1.0
+  stg_blocks: [29]
+  stg_mode: "stg_av"
+  generate_audio: true
+  generate_video: false
+  skip_initial_validation: true
+
+checkpoints:
+  interval: 250
+  keep_last_n: 3
+  precision: "bfloat16"
+
+flow_matching:
+  # High-sigma-biased mixture: with band_prob draw sigma from uniform[band_min, 1],
+  # else uniform[0, 1]. Soft high-noise bias — the leak fix (at low sigma the noised
+  # target can carry the controlled attribute itself, weakening reference reliance).
+  timestep_sampling_mode: "high_sigma_mixture"
+  timestep_sampling_params:
+    band_min: 0.7
+    band_prob: 0.6
+
+hub:
+  push_to_hub: false
+  hub_model_id: null
+
+wandb:
+  enabled: false
+  project: "ltx-2-trainer"
+  entity: null
+  tags: [ "ltx2", "ic-lora", "audio-reference", "lipdub-negative" ]
+  log_validation_videos: true
+
+seed: 42
+output_dir: "outputs/audio_reference_ic_lora"

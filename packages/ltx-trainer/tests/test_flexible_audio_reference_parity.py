@@ -15,8 +15,11 @@ contract being locked — rather than the full training pipeline, mirroring the 
 validation-sampler parity lock.
 """
 
+from pathlib import Path
+
 import pytest
 import torch
+import yaml
 
 from ltx_trainer.training_strategies.flexible import (
     REFERENCE_ROPE_GAP,
@@ -25,6 +28,8 @@ from ltx_trainer.training_strategies.flexible import (
     ModalityConfig,
     ReferenceConditionConfig,
 )
+
+_CONFIG_PATH = Path(__file__).resolve().parents[1] / "configs" / "audio_reference_ic_lora.yaml"
 
 _AUDIO_CHANNELS = 8
 _AUDIO_MEL_BINS = 16
@@ -94,3 +99,13 @@ def test_reference_positions_match_shipped_lipdub_inference_byte_equal():
         ref_vae_latents, negative_positions=True, device=torch.device("cpu")
     )
     assert torch.equal(ref_positions, upstream_positions)
+
+
+def test_shipped_audio_reference_config_pins_lipdub_negative():
+    """The shipped training config must keep the lipdub-negative convention — regenerating it
+    from the stock a2a schema (positive positions) would silently break inference parity."""
+    raw = yaml.safe_load(_CONFIG_PATH.read_text())
+    strat = FlexibleStrategyConfig(**raw["training_strategy"])
+    ref = strat.audio.conditions[0]
+    assert isinstance(ref, ReferenceConditionConfig)
+    assert ref.audio_positions_mode == "lipdub_negative"
