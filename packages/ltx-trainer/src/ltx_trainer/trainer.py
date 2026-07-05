@@ -639,7 +639,40 @@ class LtxvTrainer:
         # noinspection PyTypeChecker
         self._transformer = self._accelerator.prepare(self._transformer)
 
-        # Log GPU memory usage after model preparation
+        # Block-swap (acceleration.block_swap_blocks > 0): stream the last N
+        # transformer blocks GPU<->CPU during forward + backward so the int8 22B
+        # base fits on a 24 GB 4090. MUST run AFTER accelerator.prepare — prepare()
+        # recursively moves the whole model to the compute device, undoing any
+        # prior offload; attaching after means the wrapper's offload survives.
+        # Re-grab the base model since prepare may have wrapped it (PEFT).
+        # Single-GPU only (DDP/FSDP grad-reducer ordering on streamed blocks is
+        # untested). Default 0 = no-op.
+        if self._config.acceleration.block_swap_blocks > 0:
+            from ltx_trainer.block_swap import attach_block_swap
+
+            post_prep = (
+                self._transformer.get_base_model()
+                if hasattr(self._transformer, "get_base_model")
+                else self._transformer
+            )
+            before_gb = torch.cuda.memory_allocated() / 1024**3 if torch.cuda.is_available() else 0.0
+            mgr = attach_block_swap(
+                post_prep,
+                blocks_to_swap=self._config.acceleration.block_swap_blocks,
+                offload_device=torch.device("cpu"),
+                compute_device=self._accelerator.device,
+            )
+            after_gb = torch.cuda.memory_allocated() / 1024**3 if torch.cuda.is_available() else 0.0
+            logger.warning(
+                "Block-swap attached: %d/%d blocks streamed CPU<->GPU (VRAM %.2f -> %.2f GB)",
+                mgr.blocks_to_swap,
+                len(post_prep.transformer_blocks),
+                before_gb,
+                after_gb,
+            )
+
+        # Log GPU memory usage after model preparation (+ any post-prepare hooks
+        # like block-swap attach — if it ran, this reflects post-swap resident).
         vram_usage_gb = torch.cuda.memory_allocated() / 1024**3
         logger.debug(f"GPU memory usage after models preparation: {vram_usage_gb:.2f} GB")
 
@@ -969,6 +1002,15 @@ class LtxvTrainer:
 
             # Convert to ComfyUI-compatible format (add "diffusion_model." prefix)
             state_dict = {f"diffusion_model.{k}": v for k, v in state_dict.items()}
+
+            # Strip the `transformer_blocks.<N>.block.` segment that block-swap's
+            # StreamingBlockWrapper injects into swapped-block keys — ComfyUI's
+            # transformer has no wrapper, so those keys (often the majority of the
+            # adapter) would silently no-op at inference. Idempotent: a no-op when
+            # block-swap is off.
+            from ltx_trainer.block_swap import strip_block_swap_prefix
+
+            state_dict = strip_block_swap_prefix(state_dict)
 
             # Cast to configured precision
             state_dict = {k: v.to(save_dtype) if isinstance(v, Tensor) else v for k, v in state_dict.items()}
