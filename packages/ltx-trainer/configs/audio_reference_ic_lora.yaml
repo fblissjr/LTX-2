@@ -90,12 +90,13 @@ validation:
   # Disabled by design for this strategy: the audio-reference eval is the SCRIPTED
   # lane (scripts/render_eval_sweep.py + the ComfyUI generate-from-noise swap eval),
   # not the trainer's inline validation. interval: null keeps validation off.
+  #
+  # samples MUST stay empty here: the trainer builds a ValidationRunner unconditionally
+  # at startup and eagerly encodes every sample's media, so a placeholder audio path
+  # would crash the run before training begins even with interval: null. To enable
+  # validation, set an interval AND add samples with REAL reference-audio paths.
   interval: null
-  samples:
-    - prompt: "the reference attribute rendered on new content"
-      conditions:
-        - type: reference
-          audio: "/path/to/reference_audio.wav"
+  samples: []
   negative_prompt: "worst quality, distorted, noisy"
   video_dims: [ 512, 512, 81 ]
   frame_rate: 25.0
