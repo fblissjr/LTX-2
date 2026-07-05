@@ -93,6 +93,13 @@ class MaskConditionConfig(IntrinsicConditionBase):
     )
 
 
+# Gap (in the audio RoPE time unit) between the reference's end and the target's 0 under the
+# lipdub negative-position convention. Load-bearing: it must equal the constant the shipped
+# inference uses (ltx_pipelines.lipdub.patchify_lipdub_audio_reference_latent subtracts the same
+# 0.04); any drift silently breaks train/inference RoPE parity. Locked by cross-parity test.
+REFERENCE_ROPE_GAP = 0.04
+
+
 class ReferenceConditionConfig(BaseModel):
     """Reference conditioning (IC-LoRA style concatenation).
     External reference latents are concatenated to the target sequence.
@@ -105,6 +112,18 @@ class ReferenceConditionConfig(BaseModel):
     type: Literal["reference"] = "reference"
     latents_dir: str = Field(..., description="Directory for reference latents")
     probability: float = Field(default=1.0, ge=0.0, le=1.0, description="Probability of applying this condition")
+    audio_positions_mode: Literal["target_frame", "lipdub_negative"] = Field(
+        default="target_frame",
+        description=(
+            "RoPE position convention for AUDIO reference tokens (ignored for video). "
+            "'target_frame' (upstream default) places them at positive positions in the "
+            "target's frame. 'lipdub_negative' shifts them to strictly-negative positions "
+            "ending REFERENCE_ROPE_GAP below the target's 0, matching the shipped lipdub "
+            "inference (ltx_pipelines.lipdub.patchify_lipdub_audio_reference_latent) so an "
+            "IC-LoRA trained here stays parity-correct with the LipDub / ComfyUI audio-reference "
+            "inference path."
+        ),
+    )
 
 
 # Discriminated union for condition configs
@@ -653,6 +672,15 @@ class FlexibleStrategy(TrainingStrategy):
                 if spatial_sf != 1:
                     cond_positions[:, 1, ...] *= spatial_sf
                     cond_positions[:, 2, ...] *= spatial_sf
+        elif config.audio_positions_mode == "lipdub_negative":
+            # Shift audio reference tokens to strictly-negative positions ending REFERENCE_ROPE_GAP
+            # below the target's 0 — byte-for-byte the shipped inference convention
+            # (ltx_pipelines.lipdub.patchify_lipdub_audio_reference_latent, negative_positions=True):
+            # positive grid-bound positions, then subtract the reference's own end-bound + the gap.
+            # cond_positions is [B, 1, cond_seq_len, 2]; index [:, :, -1, 1] is each row's last
+            # upper time-bound. Load-bearing for train/inference RoPE parity; cross-parity locked.
+            aud_dur = cond_positions[:, :, -1, 1].max().item()
+            cond_positions = cond_positions - aud_dur - REFERENCE_ROPE_GAP
 
         # Condition tokens: clean, timestep=0, no loss
         cond_timesteps = torch.zeros(batch_size, cond_seq_len, device=device, dtype=dtype)
