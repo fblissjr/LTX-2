@@ -21,12 +21,16 @@ import pytest
 import torch
 import yaml
 
+from ltx_core.components.patchifiers import AudioPatchifier
+from ltx_core.types import AudioLatentShape
+
 from ltx_trainer.training_strategies.flexible import (
     REFERENCE_ROPE_GAP,
     FlexibleStrategy,
     FlexibleStrategyConfig,
     ModalityConfig,
     ReferenceConditionConfig,
+    apply_lipdub_negative_shift,
 )
 
 _CONFIG_PATH = Path(__file__).resolve().parents[1] / "configs" / "audio_reference_ic_lora.yaml"
@@ -99,6 +103,30 @@ def test_reference_positions_match_shipped_lipdub_inference_byte_equal():
         ref_vae_latents, negative_positions=True, device=torch.device("cpu")
     )
     assert torch.equal(ref_positions, upstream_positions)
+
+
+def test_shared_negative_shift_helper_matches_lipdub_byte_equal():
+    """`apply_lipdub_negative_shift` is the single source of truth used by BOTH the training path
+    (FlexibleStrategy) and the eval path (validation_runner). Lock it directly against the real
+    upstream patchify so neither path can drift."""
+    lipdub = pytest.importorskip("ltx_pipelines.lipdub")
+    ref_vae_latents = torch.randn(1, _AUDIO_CHANNELS, _REF_FRAMES, _AUDIO_MEL_BINS)
+
+    # Reproduce the positive grid-bound positions the way both paths compute them, then shift.
+    patchifier = AudioPatchifier(patch_size=1)
+    patchified = patchifier.patchify(ref_vae_latents)
+    positive = patchifier.get_patch_grid_bounds(
+        output_shape=AudioLatentShape(
+            batch=1, channels=_AUDIO_CHANNELS, frames=patchified.shape[1], mel_bins=_AUDIO_MEL_BINS
+        ),
+        device=torch.device("cpu"),
+    ).to(dtype=torch.float32)
+    shifted = apply_lipdub_negative_shift(positive)
+
+    _, upstream_positions = lipdub.patchify_lipdub_audio_reference_latent(
+        ref_vae_latents, negative_positions=True, device=torch.device("cpu")
+    )
+    assert torch.equal(shifted, upstream_positions)
 
 
 def test_shipped_audio_reference_config_pins_lipdub_negative():

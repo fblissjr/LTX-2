@@ -58,6 +58,7 @@ from ltx_trainer.model_loader import (
     load_vocoder,
 )
 from ltx_trainer.progress import SamplingContext, TrainingProgress
+from ltx_trainer.training_strategies.flexible import apply_lipdub_negative_shift
 from ltx_trainer.utils import open_image_as_srgb, save_image
 from ltx_trainer.video_utils import read_video, save_video
 
@@ -664,6 +665,12 @@ class ValidationRunner:
                     output_shape=ref_shape,
                     device=device,
                 )
+                # Match the training-side geometry for a lipdub-negative IC-LoRA: shift the reference
+                # to strictly-negative RoPE positions (shared helper = single source of truth, so
+                # train and eval can never drift). Default 'target_frame' leaves upstream's positive
+                # positions untouched.
+                if getattr(cond, "audio_positions_mode", "target_frame") == "lipdub_negative":
+                    positions = apply_lipdub_negative_shift(positions)
 
                 denoise_mask = torch.zeros(
                     *tokens.shape[:2],

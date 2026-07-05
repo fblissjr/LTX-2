@@ -100,6 +100,20 @@ class MaskConditionConfig(IntrinsicConditionBase):
 REFERENCE_ROPE_GAP = 0.04
 
 
+def apply_lipdub_negative_shift(positions: "Tensor") -> "Tensor":
+    """Shift audio-reference RoPE positions to the lipdub negative convention: subtract the
+    reference's own end-bound + REFERENCE_ROPE_GAP so the reference ends just below the target's 0.
+    Byte-for-byte matches ``ltx_pipelines.lipdub.patchify_lipdub_audio_reference_latent(negative_positions=True)``.
+
+    Single source of truth for the geometry, shared by the training path
+    (``FlexibleStrategy._apply_reference_condition``) and the eval path
+    (``validation_runner``), so the two can never drift. Positions are ``[B, 1, T_ref, 2]``;
+    index ``[:, :, -1, 1]`` is each row's last upper time-bound.
+    """
+    aud_dur = positions[:, :, -1, 1].max().item()
+    return positions - aud_dur - REFERENCE_ROPE_GAP
+
+
 class ReferenceConditionConfig(BaseModel):
     """Reference conditioning (IC-LoRA style concatenation).
     External reference latents are concatenated to the target sequence.
@@ -674,13 +688,9 @@ class FlexibleStrategy(TrainingStrategy):
                     cond_positions[:, 2, ...] *= spatial_sf
         elif config.audio_positions_mode == "lipdub_negative":
             # Shift audio reference tokens to strictly-negative positions ending REFERENCE_ROPE_GAP
-            # below the target's 0 — byte-for-byte the shipped inference convention
-            # (ltx_pipelines.lipdub.patchify_lipdub_audio_reference_latent, negative_positions=True):
-            # positive grid-bound positions, then subtract the reference's own end-bound + the gap.
-            # cond_positions is [B, 1, cond_seq_len, 2]; index [:, :, -1, 1] is each row's last
-            # upper time-bound. Load-bearing for train/inference RoPE parity; cross-parity locked.
-            aud_dur = cond_positions[:, :, -1, 1].max().item()
-            cond_positions = cond_positions - aud_dur - REFERENCE_ROPE_GAP
+            # below the target's 0 — the shipped inference convention. Shared helper so the eval
+            # path (validation_runner) uses the identical geometry. Load-bearing; cross-parity locked.
+            cond_positions = apply_lipdub_negative_shift(cond_positions)
 
         # Condition tokens: clean, timestep=0, no loss
         cond_timesteps = torch.zeros(batch_size, cond_seq_len, device=device, dtype=dtype)

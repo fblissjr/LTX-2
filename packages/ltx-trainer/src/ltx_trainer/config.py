@@ -120,6 +120,15 @@ class ReferenceConditionConfig(ConfigBaseModel):
     downscale_factor: int = Field(default=1, ge=1)
     temporal_scale_factor: int = Field(default=1, ge=1)
     include_in_output: bool = False
+    audio_positions_mode: Literal["target_frame", "lipdub_negative"] = Field(
+        default="target_frame",
+        description=(
+            "RoPE position convention for an AUDIO reference at validation/eval (ignored for video). "
+            "Must match how the LoRA was TRAINED: 'lipdub_negative' for an IC-LoRA trained with the "
+            "matching training-side option (parity with the shipped LipDub / ComfyUI inference); "
+            "'target_frame' is upstream's default positive-position convention."
+        ),
+    )
 
     @model_validator(mode="after")
     def validate_exactly_one_modality(self) -> "ReferenceConditionConfig":
